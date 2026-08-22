@@ -101,6 +101,38 @@ def group_notes_into_chords(notes: List[pretty_midi.Note]) -> List[List[pretty_m
     return chords
 
 
+def estimate_tempo_from_chords(chords: List[List[pretty_midi.Note]]) -> float:
+    """
+    pretty_midi.estimate_tempo() est peu fiable sur un fichier composé
+    uniquement d'accords plaqués (pas de pulsation régulière à détecter),
+    et renvoie souvent une valeur sans rapport avec le morceau. On calcule
+    ici un tempo directement à partir de l'écartement réel entre les
+    accords du fichier, ce qui reste cohérent quel que soit le tempo
+    d'origine.
+    """
+    if len(chords) < 2:
+        return 120.0
+
+    onsets = sorted(min(n.start for n in c) for c in chords)
+    intervals = [b - a for a, b in zip(onsets, onsets[1:]) if b - a > 0.05]
+    if not intervals:
+        return 120.0
+
+    intervals.sort()
+    median = intervals[len(intervals) // 2]
+    bpm = 60.0 / median
+
+    # Ramène le résultat dans une plage musicale plausible (60-180 bpm)
+    # en doublant/divisant par deux si besoin, plutôt que de tronquer
+    # brutalement une valeur hors plage.
+    while bpm < 60:
+        bpm *= 2
+    while bpm > 180:
+        bpm /= 2
+
+    return bpm
+
+
 def parse_instruments(raw: str) -> List[str]:
     raw = (raw or "").strip().lower()
     if not raw:
@@ -306,7 +338,7 @@ def build_drum_track(total_duration: float, tempo_bpm: float, style: str, rolls:
     beat_i = 0
     roll_index = 0
     while t < total_duration:
-        is_phrase_end = (bar_i % 4 == 3) and (beat_i == beats_per_bar - 1)
+        is_phrase_end = (bar_i % 2 == 1) and (beat_i == beats_per_bar - 1)
         if is_phrase_end:
             chosen = rolls[roll_index % len(rolls)]
             build_fill(chosen, drums, t, beat)
@@ -447,9 +479,7 @@ def orchestrate(
     if not chords:
         raise ValueError("Aucune note trouvée dans la piste piano.")
 
-    tempo = pm.estimate_tempo() if pm.get_tempo_changes()[0].size else 120.0
-    if not (40 < tempo < 240):
-        tempo = 120.0
+    tempo = estimate_tempo_from_chords(chords)
 
     total_duration = max(n.end for chord in chords for n in chord)
 
@@ -560,6 +590,11 @@ async def orchestrate_endpoint(
         raise HTTPException(status_code=400, detail=f"Fichier MIDI invalide: {e}")
 
     try:
+        detected_tempo = estimate_tempo_from_chords(group_notes_into_chords(pm.instruments[0].notes))
+    except Exception:
+        detected_tempo = 120.0
+
+    try:
         result = orchestrate(
             pm,
             instruments=instruments,
@@ -580,7 +615,10 @@ async def orchestrate_endpoint(
         return Response(
             content=data,
             media_type="audio/midi",
-            headers={"Content-Disposition": f'attachment; filename="{out_basename}.mid"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{out_basename}.mid"',
+                "X-Detected-Tempo": f"{detected_tempo:.1f}",
+            },
         )
 
     try:
@@ -598,6 +636,7 @@ async def orchestrate_endpoint(
             "Content-Disposition": f'inline; filename="{out_basename}.mp3"',
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
+            "X-Detected-Tempo": f"{detected_tempo:.1f}",
         },
     )
 
