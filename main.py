@@ -1,4 +1,3 @@
-cat > /home/claude/midi-orchestrator/main.py << 'PYEOF'
 """
 Micro-service d'orchestration MIDI -> MP3.
 
@@ -314,5 +313,3 @@ async def orchestrate_endpoint(
 async def health():
     soundfont_ok = os.path.exists(SOUNDFONT_PATH)
     return {"status": "ok", "soundfont_found": soundfont_ok, "soundfont_path": SOUNDFONT_PATH}
-PYEOF
-cd /home/claude/midi-orchestrator && python3 -c "import ast; ast.parse(open('main.py').read())" && echo "main.py réécrit et syntaxiquement valide"
