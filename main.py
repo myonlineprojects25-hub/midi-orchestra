@@ -233,15 +233,29 @@ def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
         mp3_path = os.path.join(tmp, "arrangement.mp3")
 
         pm.write(midi_path)
+        if os.path.getsize(midi_path) < 50:
+            raise RuntimeError("Fichier MIDI généré anormalement petit/vide avant rendu audio.")
 
-        subprocess.run(
+        # Étape 1 : synthèse MIDI -> WAV
+        result_wav = subprocess.run(
             ["fluidsynth", "-ni", SOUNDFONT_PATH, midi_path, "-F", wav_path, "-r", "44100"],
-            check=True, capture_output=True, timeout=60,
+            capture_output=True, timeout=60,
         )
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libmp3lame", "-b:a", "192k", mp3_path],
-            check=True, capture_output=True, timeout=60,
+        if result_wav.returncode != 0 or not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
+            raise RuntimeError(
+                f"Échec du rendu WAV (fluidsynth). stderr: {result_wav.stderr.decode(errors='ignore')[:500]}"
+            )
+
+        # Étape 2 : WAV -> MP3 via lame (encodeur MP3 dédié, plus robuste qu'un ffmpeg
+        # dont le support libmp3lame dépend du build de l'image).
+        result_mp3 = subprocess.run(
+            ["lame", "-b", "192", "-q", "2", wav_path, mp3_path],
+            capture_output=True, timeout=60,
         )
+        if result_mp3.returncode != 0 or not os.path.exists(mp3_path) or os.path.getsize(mp3_path) < 1000:
+            raise RuntimeError(
+                f"Échec de l'encodage MP3 (lame). stderr: {result_mp3.stderr.decode(errors='ignore')[:500]}"
+            )
 
         with open(mp3_path, "rb") as f:
             return f.read()
@@ -311,5 +325,12 @@ async def orchestrate_endpoint(
 
 @app.get("/health")
 async def health():
+    import shutil
     soundfont_ok = os.path.exists(SOUNDFONT_PATH)
-    return {"status": "ok", "soundfont_found": soundfont_ok, "soundfont_path": SOUNDFONT_PATH}
+    return {
+        "status": "ok",
+        "soundfont_found": soundfont_ok,
+        "soundfont_path": SOUNDFONT_PATH,
+        "fluidsynth_found": shutil.which("fluidsynth") is not None,
+        "lame_found": shutil.which("lame") is not None,
+    }
