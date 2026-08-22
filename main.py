@@ -356,7 +356,6 @@ def orchestrate(
     style: str,
     fill_types: List[str],
     add_rhythm: bool,
-    add_canon: bool,
     add_ornaments: bool,
     keep_piano: bool = True,
 ) -> pretty_midi.PrettyMIDI:
