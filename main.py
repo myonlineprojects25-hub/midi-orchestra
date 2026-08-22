@@ -51,6 +51,7 @@ INSTRUMENTS = {
     "guitar":     {"program": 25, "name": "Guitar",       "role": "arpeggio"},
     "piano_low":  {"program": 0,  "name": "Piano (grave)", "role": "bass_pulse"},
     "piano_high": {"program": 0,  "name": "Piano (aigu)",  "role": "melody_sparkle"},
+    "tuba":       {"program": 58, "name": "Tuba",          "role": "bass_pad"},
 }
 
 INSTRUMENT_ALIASES = {
@@ -60,7 +61,16 @@ INSTRUMENT_ALIASES = {
     "all": list(INSTRUMENTS.keys()),
 }
 
-STYLES = {"pop", "ballad", "latin", "waltz"}
+STYLES = {"pop", "ballad", "latin", "waltz", "classic", "gospel", "rnb", "blues"}
+
+ROLL_TYPES = {"snare": "Caisse claire", "toms": "Toms", "crescendo": "Crescendo", "double": "Double roulement"}
+
+RESPONSE_INSTRUMENTS = {
+    "clarinet": {"program": 71, "name": "Clarinet"},
+    "flute": {"program": 73, "name": "Flute"},
+    "guitar": {"program": 25, "name": "Guitar"},
+    "piano_high": {"program": 0, "name": "Piano (aigu)"},
+}
 
 
 def group_notes_into_chords(notes: List[pretty_midi.Note]) -> List[List[pretty_midi.Note]]:
@@ -182,13 +192,27 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
 # Rythme : batterie + basse, avec un pattern différent par style
 # --------------------------------------------------------------------------
 
-def add_drum_fill(drums: pretty_midi.Instrument, t: float, beat: float):
-    """Petit roulement de caisse claire (4 double-croches en crescendo) pour marquer une fin de phrase."""
+def add_drum_fill(drums: pretty_midi.Instrument, t: float, beat: float, fill_type: str = "snare"):
+    """Roulement de fin de phrase selon le type choisi."""
     step = beat / 4
-    for i in range(4):
-        vel = 70 + i * 10
-        st = t + i * step
-        drums.notes.append(pretty_midi.Note(velocity=vel, pitch=DRUM_SNARE, start=st, end=st + step * 0.8))
+    if fill_type == "toms":
+        pitches = [45, 47, 50, 48]
+        for i, pitch in enumerate(pitches):
+            drums.notes.append(pretty_midi.Note(velocity=72 + i * 8, pitch=pitch,
+                start=t + i * step, end=t + i * step + step * 0.8))
+    elif fill_type == "double":
+        for i in range(8):
+            st = t + i * step / 2
+            drums.notes.append(pretty_midi.Note(velocity=65 + i * 5, pitch=DRUM_SNARE,
+                start=st, end=st + step * 0.35))
+    elif fill_type == "crescendo":
+        for i in range(4):
+            drums.notes.append(pretty_midi.Note(velocity=55 + i * 18, pitch=DRUM_SNARE,
+                start=t + i * step, end=t + i * step + step * 0.8))
+    else:
+        for i in range(4):
+            drums.notes.append(pretty_midi.Note(velocity=70 + i * 10, pitch=DRUM_SNARE,
+                start=t + i * step, end=t + i * step + step * 0.8))
 
 
 def add_style_beat(drums: pretty_midi.Instrument, t: float, beat: float, beat_i: int, style: str):
@@ -215,6 +239,32 @@ def add_style_beat(drums: pretty_midi.Instrument, t: float, beat: float, beat_i:
         else:
             drums.notes.append(pretty_midi.Note(velocity=65, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.6))
 
+    elif style == "classic":
+        if beat_i == 0:
+            drums.notes.append(pretty_midi.Note(velocity=82, pitch=DRUM_KICK, start=t, end=t + 0.1))
+        drums.notes.append(pretty_midi.Note(velocity=45, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.35))
+
+    elif style == "gospel":
+        if beat_i in (0, 2):
+            drums.notes.append(pretty_midi.Note(velocity=100, pitch=DRUM_KICK, start=t, end=t + 0.1))
+        if beat_i in (1, 3):
+            drums.notes.append(pretty_midi.Note(velocity=95, pitch=DRUM_SNARE, start=t, end=t + 0.1))
+        drums.notes.append(pretty_midi.Note(velocity=62, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.35))
+
+    elif style == "rnb":
+        if beat_i in (0, 2):
+            drums.notes.append(pretty_midi.Note(velocity=100, pitch=DRUM_KICK, start=t, end=t + 0.1))
+        if beat_i in (1, 3):
+            drums.notes.append(pretty_midi.Note(velocity=92, pitch=DRUM_SNARE, start=t, end=t + 0.1))
+        drums.notes.append(pretty_midi.Note(velocity=68, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.3))
+
+    elif style == "blues":
+        if beat_i in (0, 2):
+            drums.notes.append(pretty_midi.Note(velocity=98, pitch=DRUM_KICK, start=t, end=t + 0.1))
+        if beat_i == 2:
+            drums.notes.append(pretty_midi.Note(velocity=90, pitch=DRUM_SNARE, start=t, end=t + 0.1))
+        drums.notes.append(pretty_midi.Note(velocity=60, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.45))
+
     else:  # "pop" par défaut
         if beat_i in (0, 2):
             drums.notes.append(pretty_midi.Note(velocity=105, pitch=DRUM_KICK, start=t, end=t + 0.1))
@@ -224,8 +274,9 @@ def add_style_beat(drums: pretty_midi.Instrument, t: float, beat: float, beat_i:
         drums.notes.append(pretty_midi.Note(velocity=55, pitch=DRUM_HIHAT_CLOSED, start=t + beat / 2, end=t + beat * 0.9))
 
 
-def build_drum_track(total_duration: float, tempo_bpm: float, style: str = "pop") -> pretty_midi.Instrument:
+def build_drum_track(total_duration: float, tempo_bpm: float, style: str = "pop", rolls: List[str] | None = None) -> pretty_midi.Instrument:
     drums = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
+    rolls = [r for r in (rolls or []) if r in ROLL_TYPES] or ["snare"]
     beat = 60.0 / max(tempo_bpm, 40)
     beats_per_bar = 3 if style == "waltz" else 4
 
@@ -235,7 +286,7 @@ def build_drum_track(total_duration: float, tempo_bpm: float, style: str = "pop"
     while t < total_duration:
         is_phrase_end = (bar_i % 4 == 3) and (beat_i == beats_per_bar - 1)
         if is_phrase_end:
-            add_drum_fill(drums, t, beat)
+            add_drum_fill(drums, t, beat, rolls[(bar_i // 4) % len(rolls)])
         else:
             add_style_beat(drums, t, beat, beat_i, style)
 
@@ -326,6 +377,35 @@ def build_ornament_track(melody_notes: List[pretty_midi.Note]) -> pretty_midi.In
             ornaments.notes.append(pretty_midi.Note(velocity=55, pitch=passing_pitch, start=start, end=start + dur))
     return ornaments
 
+def parse_list(raw: str) -> List[str]:
+    return [x.strip().lower() for x in (raw or "").split(",") if x.strip()]
+
+
+def add_phrase_responses(out_tracks, melody_notes, tempo_bpm, responses):
+    """Intercale des réponses courtes sur les fins de phrases."""
+    selected = [r for r in responses if r in RESPONSE_INSTRUMENTS]
+    if not selected:
+        return
+    beat = 60.0 / max(tempo_bpm, 40)
+    for phrase_index in range(0, len(melody_notes), 4):
+        source = melody_notes[min(phrase_index + 3, len(melody_notes) - 1)]
+        start = source.end
+        end = start + beat * 0.75
+        name = selected[(phrase_index // 4) % len(selected)]
+        spec = RESPONSE_INSTRUMENTS[name]
+        if name == "flute":
+            pitch = clamp_to_range(source.pitch + 12, 72, 96)
+        elif name == "clarinet":
+            pitch = clamp_to_range(source.pitch, 60, 90)
+        elif name == "guitar":
+            pitch = clamp_to_range(source.pitch - 12, 48, 84)
+        else:
+            pitch = clamp_to_range(source.pitch + 12, 72, 108)
+        key = "__response_" + name
+        if key not in out_tracks:
+            out_tracks[key] = pretty_midi.Instrument(program=spec["program"], name=spec["name"] + " - Réponse")
+        out_tracks[key].notes.append(pretty_midi.Note(velocity=72, pitch=pitch, start=start, end=end))
+
 
 # --------------------------------------------------------------------------
 # Assemblage
@@ -338,6 +418,8 @@ def orchestrate(
     add_rhythm: bool,
     add_canon: bool,
     add_ornaments: bool,
+    rolls: List[str] | None = None,
+    responses: List[str] | None = None,
     keep_piano: bool = True,
 ) -> pretty_midi.PrettyMIDI:
     if not pm.instruments:
@@ -358,7 +440,7 @@ def orchestrate(
 
     if add_rhythm:
         all_tracks["__bass"] = build_bass_track(chords, tempo, style)
-        all_tracks["__drums"] = build_drum_track(total_duration, tempo, style)
+        all_tracks["__drums"] = build_drum_track(total_duration, tempo, style, rolls)
 
     melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
 
@@ -367,6 +449,8 @@ def orchestrate(
 
     if add_ornaments:
         all_tracks["__ornaments"] = build_ornament_track(melody_notes)
+
+    add_phrase_responses(all_tracks, melody_notes, tempo, responses or [])
 
     out = pretty_midi.PrettyMIDI(initial_tempo=tempo)
 
@@ -423,6 +507,8 @@ async def orchestrate_endpoint(
     add_rhythm: bool = False,
     add_canon: bool = False,
     add_ornaments: bool = False,
+    rolls: str = "",
+    responses: str = "",
     keep_piano: bool = True,
     format: str = "mp3",
 ):
@@ -449,6 +535,8 @@ async def orchestrate_endpoint(
             add_rhythm=add_rhythm,
             add_canon=add_canon,
             add_ornaments=add_ornaments,
+            rolls=parse_list(rolls),
+            responses=parse_list(responses),
             keep_piano=keep_piano,
         )
     except Exception as e:
@@ -484,6 +572,8 @@ async def list_instruments():
         "instruments": {k: v["name"] for k, v in INSTRUMENTS.items()},
         "aliases": list(INSTRUMENT_ALIASES.keys()),
         "styles": sorted(STYLES),
+        "rolls": ROLL_TYPES,
+        "responses": {k: v["name"] for k, v in RESPONSE_INSTRUMENTS.items()},
     }
 
 
