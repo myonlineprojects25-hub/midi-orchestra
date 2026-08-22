@@ -7,7 +7,7 @@ arrangement enrichi et personnalisable :
 - Un ou plusieurs instruments au choix, chacun avec un rôle musical propre
   (mélodie, harmonie, basse/pad, arpège) : trompette, flûte traversière,
   clarinette, clarinette aiguë, saxophone, trombone, tuba, orgue, chœur,
-  guitare, guitare basse, guitare électrique, piano grave, piano aigu.
+  guitare, guitare basse, guitare électrique, piano grave, piano medium, piano aigu.
 - Un style rythmique (pop, ballade, latin, valse, classic, gospel, rnb, blues)
   qui change le pattern de batterie/basse.
 - Un ou plusieurs types de roulement de batterie en fin de phrase (caisse
@@ -66,6 +66,7 @@ INSTRUMENTS = {
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
     "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
     "piano_low":       {"program": 0,  "name": "Piano (grave)",    "role": "bass_pulse"},
+    "piano_medium":    {"program": 0,  "name": "Piano (medium)",   "role": "harmony"},
     "piano_high":      {"program": 0,  "name": "Piano (aigu)",     "role": "melody_sparkle"},
 }
 
