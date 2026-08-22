@@ -6,7 +6,8 @@ arrangement enrichi et personnalisable :
 
 - Un ou plusieurs instruments au choix, chacun avec un rôle musical propre
   (mélodie, harmonie, basse/pad, arpège) : trompette, flûte traversière,
-  clarinette, trombone, orgue, chœur, guitare, piano grave, piano aigu.
+  clarinette, trombone, tuba, orgue, chœur, guitare, guitare basse,
+  guitare électrique, piano grave, piano aigu.
 - Un style rythmique (pop, ballade, latin, valse) qui change le pattern
   de batterie/basse.
 - Un ou plusieurs types de roulement de batterie en fin de phrase (caisse
@@ -53,15 +54,18 @@ DRUM_TOM_HIGH = 50
 # Registre des instruments disponibles : programme General MIDI + rôle musical
 # --------------------------------------------------------------------------
 INSTRUMENTS = {
-    "trumpet":    {"program": 56, "name": "Trumpet",       "role": "melody"},
-    "flute":      {"program": 73, "name": "Flute",         "role": "melody_high"},
-    "clarinet":   {"program": 71, "name": "Clarinet",      "role": "harmony"},
-    "trombone":   {"program": 57, "name": "Trombone",      "role": "bass_pad"},
-    "organ":      {"program": 19, "name": "Organ",         "role": "bass_pad"},
-    "choir":      {"program": 52, "name": "Choir",         "role": "pad_chord"},
-    "guitar":     {"program": 25, "name": "Guitar",        "role": "arpeggio"},
-    "piano_low":  {"program": 0,  "name": "Piano (grave)", "role": "bass_pulse"},
-    "piano_high": {"program": 0,  "name": "Piano (aigu)",  "role": "melody_sparkle"},
+    "trumpet":         {"program": 56, "name": "Trumpet",           "role": "bass_pad"},
+    "flute":           {"program": 73, "name": "Flute",             "role": "melody_high"},
+    "clarinet":        {"program": 71, "name": "Clarinet",          "role": "harmony"},
+    "trombone":        {"program": 57, "name": "Trombone",          "role": "bass_pad"},
+    "tuba":            {"program": 58, "name": "Tuba",              "role": "bass_pad"},
+    "organ":           {"program": 19, "name": "Organ",             "role": "melody"},
+    "choir":           {"program": 52, "name": "Choir",             "role": "pad_chord"},
+    "guitar":          {"program": 25, "name": "Guitar",            "role": "arpeggio"},
+    "bass_guitar":     {"program": 32, "name": "Bass Guitar",       "role": "bass_pulse"},
+    "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
+    "piano_low":       {"program": 0,  "name": "Piano (grave)",     "role": "bass_pulse"},
+    "piano_high":      {"program": 0,  "name": "Piano (aigu)",      "role": "melody_sparkle"},
 }
 
 INSTRUMENT_ALIASES = {
@@ -71,7 +75,7 @@ INSTRUMENT_ALIASES = {
     "all": list(INSTRUMENTS.keys()),
 }
 
-STYLES = {"pop", "ballad", "latin", "waltz"}
+STYLES = {"pop", "ballad", "latin", "waltz", "classic", "gospel", "rnb", "blues"}
 FILL_TYPES = {"snare_roll", "tom_roll", "cymbal_swell", "hihat_build"}
 
 
@@ -254,7 +258,7 @@ def add_style_beat(drums: pretty_midi.Instrument, t: float, beat: float, beat_i:
         else:
             drums.notes.append(pretty_midi.Note(velocity=65, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.6))
 
-    else:  # "pop"
+    else:  # "pop", "classic", "gospel", "rnb", "blues"
         if beat_i in (0, 2):
             drums.notes.append(pretty_midi.Note(velocity=105, pitch=DRUM_KICK, start=t, end=t + 0.1))
         if beat_i in (1, 3):
@@ -339,32 +343,8 @@ def build_bass_track(chords, tempo_bpm: float, style: str = "pop") -> pretty_mid
 
 
 # --------------------------------------------------------------------------
-# Canon et notes d'ornement
+# Notes d’ornement
 # --------------------------------------------------------------------------
-
-def build_canon_track(melody_notes: List[pretty_midi.Note], tempo_bpm: float, delay_beats: float = 2.0) -> pretty_midi.Instrument:
-    canon = pretty_midi.Instrument(program=73, name="Canon")
-    delay = delay_beats * (60.0 / max(tempo_bpm, 40))
-    for n in melody_notes:
-        canon.notes.append(pretty_midi.Note(velocity=60, pitch=n.pitch, start=n.start + delay, end=n.end + delay))
-    return canon
-
-
-def build_ornament_track(melody_notes: List[pretty_midi.Note]) -> pretty_midi.Instrument:
-    ornaments = pretty_midi.Instrument(program=68, name="Ornaments")
-    for i in range(len(melody_notes) - 1):
-        n1 = melody_notes[i]
-        n2 = melody_notes[i + 1]
-        interval = n2.pitch - n1.pitch
-        if abs(interval) >= 3:
-            direction = 1 if interval > 0 else -1
-            passing_pitch = n1.pitch + direction * 2
-            gap = max(n2.start - n1.end, 0)
-            dur = min(0.15, gap / 2) if gap > 0 else 0.1
-            start = max(n1.end, n2.start - 0.15)
-            ornaments.notes.append(pretty_midi.Note(velocity=55, pitch=passing_pitch, start=start, end=start + dur))
-    return ornaments
-
 
 # --------------------------------------------------------------------------
 # Assemblage
@@ -401,9 +381,6 @@ def orchestrate(
         all_tracks["__drums"] = build_drum_track(total_duration, tempo, style, fill_types)
 
     melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
-
-    if add_canon:
-        all_tracks["__canon"] = build_canon_track(melody_notes, tempo)
 
     if add_ornaments:
         all_tracks["__ornaments"] = build_ornament_track(melody_notes)
@@ -475,7 +452,6 @@ async def orchestrate_endpoint(
     style: str = "pop",
     fill_types: str = "snare_roll",   # ex: "snare_roll,tom_roll,cymbal_swell"
     add_rhythm: bool = False,
-    add_canon: bool = False,
     add_ornaments: bool = False,
     keep_piano: bool = True,
     format: str = "mp3",
@@ -506,7 +482,6 @@ async def orchestrate_endpoint(
             style=style,
             fill_types=fills,
             add_rhythm=add_rhythm,
-            add_canon=add_canon,
             add_ornaments=add_ornaments,
             keep_piano=keep_piano,
         )
