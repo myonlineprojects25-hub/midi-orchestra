@@ -409,8 +409,8 @@ def build_bass_track(chords, tempo_bpm: float, style: str = "pop") -> pretty_mid
 # --------------------------------------------------------------------------
 
 def build_ornament_track(melody_notes: List[pretty_midi.Note]) -> pretty_midi.Instrument:
-    """Notes de passage / d'échappée entre les notes mélodiques, pour densifier la ligne."""
-    ornaments = pretty_midi.Instrument(program=68, name="Ornaments")  # hautbois
+    """Notes de passage / d'échappée entre les notes mélodiques."""
+    ornaments = pretty_midi.Instrument(program=68, name="Ornaments")
     for i in range(len(melody_notes) - 1):
         n1 = melody_notes[i]
         n2 = melody_notes[i + 1]
@@ -421,39 +421,280 @@ def build_ornament_track(melody_notes: List[pretty_midi.Note]) -> pretty_midi.In
             gap = max(n2.start - n1.end, 0)
             dur = min(0.15, gap / 2) if gap > 0 else 0.1
             start = max(n1.end, n2.start - 0.15)
-            ornaments.notes.append(pretty_midi.Note(velocity=55, pitch=passing_pitch, start=start, end=start + dur))
+            ornaments.notes.append(pretty_midi.Note(
+                velocity=55, pitch=passing_pitch, start=start, end=start + dur
+            ))
     return ornaments
 
 
-def build_response_tracks(melody_notes: List[pretty_midi.Note], tempo_bpm: float, responses: List[str]) -> dict:
+# --------------------------------------------------------------------------
+# RÉPONSES INSTRUMENTALES — moteur Call & Response
+# --------------------------------------------------------------------------
+#
+# La version précédente faisait toujours :
+#   fin de phrase -> note finale -> +2 demi-tons.
+#
+# Ce moteur construit au contraire une petite phrase en fonction de :
+#   - la direction de la phrase mélodique ;
+#   - l'accord de départ et surtout l'accord d'arrivée ;
+#   - des notes communes entre les accords ;
+#   - du registre de l'instrument ;
+#   - du style rythmique ;
+#   - d'une variation cyclique.
+#
+# Le résultat doit compléter le piano, pas simplement répéter sa dernière note.
+
+def _response_pcs(chord) -> List[int]:
+    return sorted(set(int(n.pitch) % 12 for n in chord))
+
+
+def _nearest_pc_pitch(pc: int, reference: int, low: int, high: int) -> int:
+    candidates = [
+        pc + 12 * octave
+        for octave in range(-1, 11)
+        if low <= pc + 12 * octave <= high
+    ]
+    return min(candidates, key=lambda p: abs(p - reference)) if candidates else clamp_to_range(reference, low, high)
+
+
+def _response_register(name: str):
+    return {
+        "clarinet": (55, 84),
+        "flute": (72, 96),
+        "guitar": (52, 79),
+        "piano_high": (72, 100),
+    }.get(name, (55, 84))
+
+
+def _response_target_pitches(last_note, current_chord, next_chord, name, contour):
+    """Construit des cibles harmoniques à partir de l'accord d'arrivée."""
+    low, high = _response_register(name)
+    current = _response_pcs(current_chord)
+    arrival = _response_pcs(next_chord) or current or [last_note.pitch % 12]
+
+    common = [pc for pc in current if pc in arrival]
+
+    # Les voix de réponse privilégient d'abord les degrés intermédiaires
+    # de l'accord d'arrivée, puis les notes communes, puis les autres.
+    ordered = []
+    for pc in ([arrival[1], arrival[2]] if len(arrival) >= 3 else []):
+        if pc not in ordered:
+            ordered.append(pc)
+    for pc in common + arrival:
+        if pc not in ordered:
+            ordered.append(pc)
+
+    reference = last_note.pitch + (12 if name in ("flute", "piano_high") else 0)
+    pitches = [_nearest_pc_pitch(ordered[0], reference, low, high)]
+
+    for pc in ordered[1:]:
+        candidate = _nearest_pc_pitch(pc, pitches[-1], low, high)
+        if abs(candidate - pitches[-1]) <= 12:
+            pitches.append(candidate)
+        if len(pitches) >= 5:
+            break
+
+    if contour > 0:
+        pitches = sorted(pitches)
+    elif contour < 0:
+        pitches = sorted(pitches, reverse=True)
+
+    return pitches
+
+
+def _response_pattern(name, pitches, variation):
+    if not pitches:
+        return []
+
+    if name == "clarinet":
+        seq = pitches[:3]
+        return list(reversed(seq)) if variation % 2 else seq
+
+    if name == "flute":
+        seq = pitches[:3]
+        if variation % 3 == 1 and len(seq) >= 3:
+            return [seq[0], seq[-1], seq[1]]
+        return list(reversed(seq)) if variation % 3 == 2 else seq
+
+    if name == "guitar":
+        seq = pitches[:4]
+        while len(seq) < 4:
+            seq.append(seq[-2] if len(seq) > 1 else seq[-1])
+        return [seq[0], seq[2], seq[1], seq[3]] if variation % 2 else seq
+
+    if name == "piano_high":
+        seq = pitches[:3]
+        if len(seq) == 1:
+            return seq * 3
+        if len(seq) == 2:
+            return [seq[0], seq[1], seq[0]]
+        return [seq[0], seq[2], seq[1], seq[2]]
+
+    return pitches[:3]
+
+
+def _response_rhythm(name, style, beat):
+    patterns = {
+        "pop":    [0.00, 0.40, 0.80],
+        "ballad": [0.00, 0.55, 1.10],
+        "latin":  [0.00, 0.25, 0.50, 0.75],
+        "waltz":  [0.00, 0.50, 1.00],
+        "classic": [0.00, 0.25, 0.50, 0.75],
+        "gospel": [0.00, 0.25, 0.75, 1.00],
+        "rnb":    [0.00, 0.38, 0.88],
+        "blues":  [0.00, 0.35, 0.70],
+    }
+    offsets = patterns.get(style, patterns["pop"])
+
+    if name in ("clarinet", "flute"):
+        offsets = offsets[:3]
+    elif name == "guitar":
+        offsets = [0.00, 0.25, 0.50, 0.75]
+    elif name == "piano_high":
+        offsets = [0.00, 0.25, 0.50, 0.75]
+
+    events = []
+    for i, offset in enumerate(offsets):
+        start = offset * beat
+        next_start = offsets[i + 1] * beat if i + 1 < len(offsets) else start + beat * 0.45
+        dur = min(
+            (next_start - start) * 0.72,
+            beat * (0.48 if name in ("clarinet", "flute") else 0.34),
+        )
+        if dur >= 0.07:
+            events.append((start, dur))
+    return events
+
+
+def build_response_tracks(
+    melody_notes: List[pretty_midi.Note],
+    chords,
+    tempo_bpm: float,
+    responses: List[str],
+    style: str = "pop",
+) -> dict:
     """
-    Courtes réponses instrumentales (2 notes en écho) jouées en fin de phrase
-    (toutes les 4 notes mélodiques), alternées entre les instruments choisis.
+    Génère de vraies petites phrases de réponse instrumentale.
+
+    Une réponse est déclenchée à la fin de chaque groupe de quatre accords.
+    Elle regarde les quatre dernières notes mélodiques, répond au contour de
+    la phrase et termine dans l'harmonie de l'accord suivant.
+
+    Les instruments ne jouent pas la même cellule :
+      clarinette = ligne legato et descendante/ascendante ;
+      flûte       = réponse légère et chantante ;
+      guitare     = petit arpège rythmique ;
+      piano aigu  = motif brillant en va-et-vient.
     """
-    if not responses:
+    if not responses or not melody_notes or not chords:
         return {}
 
     beat = 60.0 / max(tempo_bpm, 40)
     tracks = {
-        name: pretty_midi.Instrument(program=RESPONSE_INSTRUMENTS[name], name=f"Réponse {name.capitalize()}")
+        name: pretty_midi.Instrument(
+            program=RESPONSE_INSTRUMENTS[name],
+            name=f"Réponse {name.capitalize()}",
+        )
         for name in responses
+        if name in RESPONSE_INSTRUMENTS
     }
+    if not tracks:
+        return {}
 
-    resp_i = 0
-    for i, n in enumerate(melody_notes):
-        if i % 4 == 3 and i + 1 < len(melody_notes):
-            name = responses[resp_i % len(responses)]
-            resp_i += 1
-            track = tracks[name]
+    response_index = 0
 
-            base_pitch = n.pitch
-            if name in ("piano_high", "flute"):
-                base_pitch = clamp_to_range(base_pitch + 12, 72, 96)
+    for end_i in range(3, min(len(melody_notes), len(chords)) - 1, 4):
+        last = melody_notes[end_i]
+        current_chord = chords[end_i]
+        next_chord = chords[end_i + 1]
 
-            start = n.end + 0.05
-            track.notes.append(pretty_midi.Note(velocity=75, pitch=base_pitch, start=start, end=start + beat * 0.3))
-            neighbor = clamp_to_range(base_pitch + 2, 40, 100)
-            track.notes.append(pretty_midi.Note(velocity=65, pitch=neighbor, start=start + beat * 0.35, end=start + beat * 0.6))
+        phrase = melody_notes[max(0, end_i - 3):end_i + 1]
+        contour_sum = sum(
+            phrase[i + 1].pitch - phrase[i].pitch
+            for i in range(len(phrase) - 1)
+        )
+
+        if contour_sum > 2:
+            contour = -1
+        elif contour_sum < -2:
+            contour = 1
+        else:
+            contour = -1 if response_index % 2 == 0 else 1
+
+        name = responses[response_index % len(responses)]
+        response_index += 1
+        if name not in tracks:
+            continue
+
+        start = last.end + min(0.045, beat * 0.06)
+
+        pitches = _response_target_pitches(
+            last, current_chord, next_chord, name, contour
+        )
+        pattern = _response_pattern(name, pitches, response_index)
+        rhythm = _response_rhythm(name, style, beat)
+
+        count = min(len(pattern), len(rhythm))
+        if count == 0:
+            continue
+
+        base_velocity = {
+            "clarinet": 68,
+            "flute": 66,
+            "guitar": 73,
+            "piano_high": 64,
+        }.get(name, 68)
+
+        low, high = _response_register(name)
+        track = tracks[name]
+        previous = None
+
+        for i in range(count):
+            offset, duration = rhythm[i]
+            pitch = clamp_to_range(int(pattern[i]), low, high)
+
+            # Évite les répétitions mécaniques.
+            if previous is not None and pitch == previous:
+                if pitch + 12 <= high:
+                    pitch += 12
+                elif pitch - 12 >= low:
+                    pitch -= 12
+
+            # Les vents peuvent utiliser une approche conjointe sur un grand saut.
+            if (
+                i == 0
+                and name in ("clarinet", "flute")
+                and abs(pitch - last.pitch) >= 7
+            ):
+                direction = 1 if pitch > last.pitch else -1
+                approach = last.pitch + 2 * direction
+                if low <= approach <= high:
+                    pitch = approach
+
+            note_start = start + offset
+            note_end = note_start + duration
+
+            # Une réponse ne dépasse jamais ~1,35 temps.
+            hard_limit = start + beat * 1.35
+            if note_start >= hard_limit:
+                continue
+            note_end = min(note_end, hard_limit)
+
+            if note_end <= note_start + 0.045:
+                continue
+
+            velocity = min(
+                127,
+                max(35, base_velocity - 5 + int(i * 4)),
+            )
+
+            track.notes.append(pretty_midi.Note(
+                velocity=velocity,
+                pitch=pitch,
+                start=note_start,
+                end=note_end,
+            ))
+            previous = pitch
 
     return tracks
 
@@ -461,6 +702,7 @@ def build_response_tracks(melody_notes: List[pretty_midi.Note], tempo_bpm: float
 # --------------------------------------------------------------------------
 # Assemblage
 # --------------------------------------------------------------------------
+
 
 def orchestrate(
     pm: pretty_midi.PrettyMIDI,
@@ -496,7 +738,7 @@ def orchestrate(
         all_tracks["__ornaments"] = build_ornament_track(melody_notes)
 
     if responses:
-        response_tracks = build_response_tracks(melody_notes, tempo, responses)
+        response_tracks = build_response_tracks(melody_notes, chords, tempo, responses, style)
         for name, track in response_tracks.items():
             all_tracks[f"__response_{name}"] = track
 
