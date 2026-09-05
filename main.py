@@ -102,6 +102,14 @@ def group_notes_into_chords(notes: List[pretty_midi.Note]) -> List[List[pretty_m
     return chords
 
 
+def chord_start(chord: List[pretty_midi.Note]) -> float:
+    return min((n.start for n in chord), default=0.0)
+
+
+def chord_end(chord: List[pretty_midi.Note]) -> float:
+    return max((n.end for n in chord), default=0.0)
+
+
 def estimate_tempo_from_chords(chords: List[List[pretty_midi.Note]]) -> float:
     if len(chords) < 2:
         return 120.0
@@ -183,48 +191,70 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     beat = 60.0 / max(tempo, 40)
 
     for chord in chords:
-        pitches = sorted(chord, key=lambda n: n.pitch)
-        start = min(n.start for n in chord)
-        end = max(n.end for n in chord)
+        # Le MIDI source contient les 4 voix SATB.
+        # Elles constituent le matériau harmonique de chaque instrument.
+        pitches = sorted(chord, key=lambda n: (n.pitch, n.start, n.end))
+        start = chord_start(pitches)
+        end = chord_end(pitches)
         bass = pitches[0]
         melody = pitches[-1]
         inner = pitches[1:-1]
+        voices = pitches[:4]
 
         if role == "melody":
-            track.notes.append(pretty_midi.Note(
-                velocity=95, pitch=melody.pitch, start=start, end=max(start + 0.3, end - 0.05)
-            ))
+            for i, n in enumerate(voices):
+                p = clamp_to_range(n.pitch + (12 if i == 3 else 0), 48, 96)
+                track.notes.append(pretty_midi.Note(
+                    velocity=88 if i == 3 else 72,
+                    pitch=p,
+                    start=start,
+                    end=max(start + 0.3, end - 0.05),
+                ))
 
         elif role == "melody_high":
-            p = clamp_to_range(melody.pitch + 12, 72, 96)
-            track.notes.append(pretty_midi.Note(velocity=80, pitch=p, start=start, end=end))
+            for i, n in enumerate(voices):
+                p = clamp_to_range(n.pitch + (12 if i >= 2 else 0), 60, 100)
+                track.notes.append(pretty_midi.Note(
+                    velocity=84 if i == 3 else 68,
+                    pitch=p, start=start, end=end
+                ))
 
         elif role == "melody_sparkle":
-            p = clamp_to_range(melody.pitch + 12, 72, 108)
             dur = min(0.25, end - start)
-            track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=start, end=start + dur))
+            for i, n in enumerate(voices):
+                p = clamp_to_range(n.pitch + 12, 60, 108)
+                track.notes.append(pretty_midi.Note(
+                    velocity=78 if i == 3 else 64,
+                    pitch=p, start=start, end=start + dur
+                ))
 
         elif role == "harmony":
-            if inner:
-                for n in inner:
-                    track.notes.append(pretty_midi.Note(velocity=75, pitch=n.pitch, start=start, end=end))
-            else:
+            for i, n in enumerate(voices):
+                p = clamp_to_range(n.pitch, 48, 84)
                 track.notes.append(pretty_midi.Note(
-                    velocity=70, pitch=max(melody.pitch - 12, 0), start=start, end=end
+                    velocity=76 if i in (1, 2) else 68,
+                    pitch=p, start=start, end=end
                 ))
 
         elif role == "harmony_high":
-            if inner:
-                for n in inner:
-                    p = clamp_to_range(n.pitch + 12, 72, 96)
-                    track.notes.append(pretty_midi.Note(velocity=72, pitch=p, start=start, end=end))
-            else:
-                p = clamp_to_range(melody.pitch + 12, 72, 96)
-                track.notes.append(pretty_midi.Note(velocity=68, pitch=p, start=start, end=end))
+            for i, n in enumerate(voices):
+                p = clamp_to_range(n.pitch + 12, 60, 100)
+                track.notes.append(pretty_midi.Note(
+                    velocity=74 if i >= 1 else 64,
+                    pitch=p, start=start, end=end
+                ))
 
         elif role == "bass_pad":
-            p = clamp_to_range(bass.pitch - 12, 24, 48)
-            track.notes.append(pretty_midi.Note(velocity=65, pitch=p, start=start, end=end))
+            for i, n in enumerate(voices):
+                if i == 0:
+                    p = clamp_to_range(n.pitch - 12, 24, 48)
+                    vel = 82
+                else:
+                    p = clamp_to_range(n.pitch, 36, 67)
+                    vel = 58
+                track.notes.append(pretty_midi.Note(
+                    velocity=vel, pitch=p, start=start, end=end
+                ))
 
         elif role == "pad_chord":
             for n in pitches:
