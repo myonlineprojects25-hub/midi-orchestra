@@ -118,83 +118,45 @@ RESPONSE_INSTRUMENTS = {
 # Lecture / analyse de la partition source
 # --------------------------------------------------------------------------
 
-def group_notes_into_chords(
-    notes: List[pretty_midi.Note],
-) -> List[List[pretty_midi.Note]]:
-    """
-    Regroupe les notes par attaque.
-
-    Pour une partition SATB saisie comme une seule piste, les quatre notes
-    d'un événement harmonique ont normalement le même onset (ou quelques
-    millisecondes d'écart). Toutes les notes sont conservées.
-    """
+def group_notes_into_chords(notes: List[pretty_midi.Note]) -> List[List[pretty_midi.Note]]:
+    """Regroupe les notes par onset pour former les événements harmoniques."""
     notes = sorted(notes, key=lambda n: (n.start, n.pitch))
-    groups: List[List[pretty_midi.Note]] = []
-    current: List[pretty_midi.Note] = []
-
+    groups = []
     for note in notes:
-        if (
-            not current
-            or note.start - current[0].start <= CHORD_TOLERANCE
-        ):
-            current.append(note)
+        if not groups or note.start - min(n.start for n in groups[-1]) > CHORD_TOLERANCE:
+            groups.append([note])
         else:
-            groups.append(current)
-            current = [note]
-
-    if current:
-        groups.append(current)
-
+            groups[-1].append(note)
+    for group in groups:
+        group.sort(key=lambda n: (n.pitch, n.start))
     return groups
 
 
-def normalize_four_voice_chord(
-    chord: List[pretty_midi.Note],
-) -> List[pretty_midi.Note]:
-    """
-    Retourne les notes de l'événement classées grave -> aigu.
+def collect_satb_chords(pm: pretty_midi.PrettyMIDI) -> List[List[pretty_midi.Note]]:
+    """Lit TOUTES les pistes musicales et reconstruit les groupes SATB."""
+    notes = []
+    for inst in pm.instruments:
+        if not inst.is_drum:
+            notes.extend(inst.notes)
 
-    On ne supprime aucune note. Si le MIDI contient plus de quatre notes
-    simultanées, toutes restent disponibles ; les quatre positions SATB
-    principales sont simplement les quatre extrêmes/centrales utiles.
-    """
-    return sorted(chord, key=lambda n: (n.pitch, n.start, n.end))
+    if not notes:
+        return []
 
-
-def chord_start(chord: List[pretty_midi.Note]) -> float:
-    return min(n.start for n in chord)
-
-
-def chord_end(chord: List[pretty_midi.Note]) -> float:
-    return max(n.end for n in chord)
-
-
-def chord_pitches(chord: List[pretty_midi.Note]) -> List[int]:
-    return [n.pitch for n in normalize_four_voice_chord(chord)]
-
-
-def chord_pitch_classes(chord: List[pretty_midi.Note]) -> List[int]:
+    groups = group_notes_into_chords(notes)
     result = []
-    for p in chord_pitches(chord):
-        pc = p % 12
-        if pc not in result:
-            result.append(pc)
+    for group in groups:
+        # NE PAS dédupliquer les hauteurs : deux voix SATB peuvent
+        # volontairement chanter/jouer la même hauteur à l'octave ou à
+        # l'unisson. Chaque piste source représente une vraie voix.
+        group = sorted(group, key=lambda x: x.pitch)
+
+        # Le format attendu est jusqu'à quatre voix. Pour le MIDI SATB,
+        # on conserve exactement les quatre notes présentes sur chaque onset.
+        if len(group) > 4:
+            group = [group[0], group[1], group[-2], group[-1]]
+
+        result.append(group)
     return result
-
-
-def chord_bass(chord: List[pretty_midi.Note]) -> int:
-    return min(n.pitch for n in chord)
-
-
-def chord_soprano(chord: List[pretty_midi.Note]) -> int:
-    return max(n.pitch for n in chord)
-
-
-def chord_inner_notes(chord: List[pretty_midi.Note]) -> List[pretty_midi.Note]:
-    notes = normalize_four_voice_chord(chord)
-    if len(notes) <= 2:
-        return notes
-    return notes[1:-1]
 
 
 def estimate_tempo_from_chords(
@@ -569,261 +531,74 @@ def add_arpeggio_from_source(
             i += 1
 
 
-def _add_monophonic_chord_sequence(
+def _add_four_voice_voicing(
     track: pretty_midi.Instrument,
     chord: List[pretty_midi.Note],
     low: int,
     high: int,
-    velocity: int,
-    tempo: float,
-    pattern: str = "up",
+    velocity_scale: float,
 ):
+    """Joue les quatre voix du groupe simultanément."""
+    voices = sorted(chord, key=lambda n: n.pitch)[-4:]
+    pitches = []
+
+    for n in voices:
+        p = clamp_to_range(int(n.pitch), low, high)
+        while pitches and p <= pitches[-1] and p + 12 <= high:
+            p += 12
+        pitches.append(p)
+
+    for p, n in zip(pitches, voices):
+        if n.end > n.start:
+            track.notes.append(pretty_midi.Note(
+                velocity=max(35, min(127, int(n.velocity * velocity_scale))),
+                pitch=p,
+                start=n.start,
+                end=n.end,
+            ))
+
+
+def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     """
-    Fait entendre TOUTES les voix du groupe source sur un instrument
-    monophonique, sous forme de petit arpège musical.
-
-    Important : une trompette, flûte ou clarinette ne peut pas jouer quatre
-    notes simultanément. On ne réduit donc plus le groupe à une seule note :
-    les 4 voix sont jouées successivement dans la durée de l'événement.
-    """
-    notes = normalize_four_voice_chord(chord)
-    if not notes:
-        return
-
-    pitches = [clamp_to_range(n.pitch, low, high) for n in notes]
-    # Supprime uniquement les doublons de hauteur, jamais les degrés distincts.
-    unique = []
-    for p in pitches:
-        if p not in unique:
-            unique.append(p)
-
-    if not unique:
-        return
-
-    if pattern == "down":
-        seq = list(reversed(unique))
-    elif pattern == "up_down" and len(unique) >= 3:
-        seq = unique + list(reversed(unique[1:-1]))
-    else:
-        seq = unique
-
-    start = chord_start(chord)
-    end = chord_end(chord)
-    duration = end - start
-
-    # Si l'accord est très court, jouer au moins une attaque par note source
-    # reste impossible physiquement ; on compresse alors proprement.
-    step = max(duration / len(seq), 0.06)
-
-    for i, pitch in enumerate(seq):
-        note_start = start + i * step
-        if note_start >= end:
-            break
-        note_end = min(end, note_start + step * 0.88)
-        add_note(
-            track,
-            pitch,
-            note_start,
-            note_end,
-            velocity,
-            low,
-            high,
-        )
-
-
-def _add_full_chord_piano(
-    track: pretty_midi.Instrument,
-    chord: List[pretty_midi.Note],
-    low: int,
-    high: int,
-    velocity: int,
-):
-    """Voicing complet des quatre voix pour les instruments polyphoniques."""
-    add_full_voicing(
-        track,
-        chord,
-        low=low,
-        high=high,
-        velocity=velocity,
-    )
-
-
-def build_solo_track(
-    name: str,
-    chords: List[List[pretty_midi.Note]],
-    tempo: float,
-) -> pretty_midi.Instrument:
-    """
-    Construit une PARTIE MUSICALE COMPLÈTE à partir des quatre voix source.
-
-    Règle fondamentale de MIDI-ORCHESTRA :
-      - aucun instrument mélodique ne reçoit uniquement la soprano ;
-      - aucun instrument harmonique ne reçoit uniquement une voix intérieure ;
-      - les instruments monophoniques jouent les quatre voix sous forme
-        d'arpèges/contrechants successifs ;
-      - les instruments polyphoniques jouent le voicing complet.
-
-    Ainsi, chaque instrument sélectionné parcourt toute la progression
-    harmonique du MIDI importé.
+    Chaque instrument reçoit maintenant les QUATRE VOIX simultanément.
+    Aucun instrument n'est réduit à la soprano, à la basse ou aux voix
+    intérieures. Le registre est adapté à l'instrument, mais la polyphonie
+    SATB est conservée.
     """
     spec = INSTRUMENTS[name]
-    role = spec["role"]
+    track = pretty_midi.Instrument(program=spec["program"], name=spec["name"])
 
-    track = pretty_midi.Instrument(
-        program=spec["program"],
-        name=spec["name"],
-    )
+    ranges = {
+        "trumpet": (48, 84),
+        "flute": (67, 100),
+        "clarinet": (50, 91),
+        "clarinet_high": (67, 103),
+        "saxophone": (52, 88),
+        "trombone": (40, 76),
+        "tuba": (28, 60),
+        "organ": (36, 96),
+        "choir": (36, 96),
+        "guitar": (40, 88),
+        "bass_guitar": (28, 60),
+        "electric_guitar": (40, 88),
+        "piano_low": (28, 60),
+        "piano_medium": (48, 88),
+        "piano_high": (60, 108),
+    }
+    low, high = ranges.get(name, (36, 96))
+
+    scales = {
+        "choir": .85, "organ": .80, "piano_low": .90,
+        "piano_medium": .95, "piano_high": .90,
+        "bass_guitar": .90, "tuba": .90, "trombone": .92,
+        "trumpet": .92, "flute": .90, "clarinet": .92,
+        "clarinet_high": .90, "saxophone": .92, "guitar": .90,
+        "electric_guitar": .92,
+    }
+    scale = scales.get(name, .90)
 
     for chord in chords:
-        if not chord:
-            continue
-
-        if role == "melody_high":
-            # Flûte : tous les degrés du groupe, en arpège montant,
-            # dans un registre aigu.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=67, high=98,
-                velocity=88,
-                tempo=tempo,
-                pattern="up",
-            )
-
-        elif role == "melody":
-            # Saxophone : quatre voix sous forme de contrechant arpégé.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=52, high=88,
-                velocity=92,
-                tempo=tempo,
-                pattern="up_down",
-            )
-
-        elif role == "melody_sparkle":
-            # Piano aigu : voicing complet, registre aigu.
-            _add_full_chord_piano(
-                track, chord,
-                low=72, high=108,
-                velocity=82,
-            )
-
-        elif role == "harmony":
-            # Clarinette : toute l'harmonie, arpège montant/descendant.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=50, high=88,
-                velocity=84,
-                tempo=tempo,
-                pattern="up_down",
-            )
-
-        elif role == "harmony_high":
-            # Clarinette aiguë : même matière harmonique, transposée/aiguë
-            # par le registre cible.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=67, high=100,
-                velocity=80,
-                tempo=tempo,
-                pattern="up_down",
-            )
-
-        elif role == "bass_pad":
-            # Trompette/Trombone/Tuba : on ne garde plus seulement la basse.
-            # Toute la matière harmonique est parcourue dans leur registre.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=36, high=72,
-                velocity=86,
-                tempo=tempo,
-                pattern="up_down",
-            )
-
-        elif role == "pad_chord":
-            # Chœur : les quatre voix simultanément.
-            _add_full_chord_piano(
-                track, chord,
-                low=36, high=96,
-                velocity=82,
-            )
-
-        elif role == "arpeggio":
-            # Guitares : les quatre voix sont explicitement utilisées.
-            add_arpeggio_from_source(
-                track,
-                [chord],
-                tempo,
-                low=48,
-                high=92,
-                velocity=82,
-            )
-
-        elif role == "bass_pulse":
-            # Basse : la fonction rythmique reste ancrée sur la basse,
-            # mais les changements d'accord sont tous parcourus.
-            notes = normalize_four_voice_chord(chord)
-            if notes:
-                bass = notes[0].pitch
-                fifth = bass + 7
-                start = chord_start(chord)
-                end = chord_end(chord)
-                beat = 60.0 / max(tempo, 40)
-                t = start
-                i = 0
-                while t < end:
-                    pitch = bass if i % 2 == 0 else fifth
-                    add_note(
-                        track,
-                        pitch,
-                        t,
-                        min(t + beat * 0.82, end),
-                        88,
-                        28,
-                        60,
-                    )
-                    t += beat
-                    i += 1
-
-        elif role == "full_voicing_medium":
-            # Piano medium : les quatre voix du groupe source.
-            _add_full_chord_piano(
-                track, chord,
-                low=48, high=84,
-                velocity=86,
-            )
-
-        elif role == "low_voicing":
-            # Piano grave : basse + ténor, mais sur toute la progression.
-            notes = normalize_four_voice_chord(chord)
-            if notes:
-                for note in notes[:2]:
-                    add_note(
-                        track,
-                        note.pitch - 12,
-                        note.start,
-                        note.end,
-                        82,
-                        28,
-                        60,
-                    )
-
-        elif role == "melody_harmonic":
-            # Trompette : tous les degrés de l'accord, en petit arpège.
-            _add_monophonic_chord_sequence(
-                track, chord,
-                low=52, high=88,
-                velocity=94,
-                tempo=tempo,
-                pattern="up_down",
-            )
-
-        elif role == "full_chord":
-            # Sécurité pour tout futur instrument polyphonique.
-            _add_full_chord_piano(
-                track, chord,
-                low=36, high=96,
-                velocity=80,
-            )
+        _add_four_voice_voicing(track, chord, low, high, scale)
 
     return track
 
@@ -1663,149 +1438,73 @@ def orchestrate(
     keep_piano: bool = True,
 ) -> pretty_midi.PrettyMIDI:
     if not pm.instruments:
-        raise ValueError(
-            "Aucune piste trouvée dans le fichier MIDI."
-        )
+        raise ValueError("Aucune piste trouvée dans le fichier MIDI.")
 
-    # ------------------------------------------------------------------
-    # SOURCE MUSICALE
-    # ------------------------------------------------------------------
-    #
-    # Une seule piste source est attendue : elle contient les quatre voix.
-    # On conserve CHAQUE note.
-    #
-    source_track = pm.instruments[0]
-
-    chords = group_notes_into_chords(
-        source_track.notes
-    )
-
+    # Le MIDI source peut contenir Soprano, Alto, Ténor et Basse sur quatre
+    # pistes séparées : toutes les pistes musicales sont donc utilisées.
+    chords = collect_satb_chords(pm)
     if not chords:
-        raise ValueError(
-            "Aucune note trouvée dans la piste MIDI source."
+        raise ValueError("Aucune note musicale trouvée dans le fichier MIDI.")
+
+    tempo = estimate_tempo_from_chords(chords)
+    total_duration = max(n.end for chord in chords for n in chord)
+
+    # Tous les instruments sélectionnés reçoivent les 4 voix simultanément.
+    all_tracks = {
+        name: build_solo_track(name, chords, tempo)
+        for name in instruments
+    }
+
+    if add_rhythm:
+        all_tracks["__bass"] = build_bass_track(chords, tempo, style)
+        all_tracks["__drums"] = build_drum_track(
+            total_duration, tempo, style, rolls
         )
 
-    source_analysis = build_source_analysis(
-        chords
-    )
-
-    # Analyse utilisée par les couches mélodiques.
+    # Les enrichissements utilisent la voix supérieure uniquement comme
+    # référence mélodique. Ils ne modifient pas les parties SATB principales.
     melody_notes = [
-        analysis["notes"][-1]
-        for analysis in source_analysis
-        if analysis["notes"]
+        sorted(chord, key=lambda n: n.pitch)[-1]
+        for chord in chords
+        if chord
     ]
 
-    tempo = estimate_tempo_from_chords(
-        chords
-    )
-
-    total_duration = max(
-        analysis["end"]
-        for analysis in source_analysis
-    )
-
-    # ------------------------------------------------------------------
-    # PARTIES INSTRUMENTALES COMPLÈTES
-    # ------------------------------------------------------------------
-    all_tracks = {}
-
-    for name in instruments:
-        if name not in INSTRUMENTS:
-            continue
-
-        all_tracks[name] = build_solo_track(
-            name,
-            chords,
-            tempo,
-        )
-
-    # ------------------------------------------------------------------
-    # RYTHME
-    # ------------------------------------------------------------------
-    if add_rhythm:
-        all_tracks["__bass"] = build_bass_track(
-            chords,
-            tempo,
-            style,
-        )
-
-        all_tracks["__drums"] = build_drum_track(
-            total_duration,
-            tempo,
-            style,
-            rolls,
-        )
-
-    # ------------------------------------------------------------------
-    # RÉPONSES
-    # ------------------------------------------------------------------
     reserved_indices = set()
-
     if responses:
-        response_tracks, reserved_indices = (
-            build_response_tracks(
-                melody_notes,
-                chords,
-                tempo,
-                responses,
-                style,
-            )
+        response_tracks, reserved_indices = build_response_tracks(
+            melody_notes, chords, tempo, responses, style
         )
-
         for name, track in response_tracks.items():
-            all_tracks[
-                f"__response_{name}"
-            ] = track
+            all_tracks[f"__response_{name}"] = track
 
-    # ------------------------------------------------------------------
-    # ORNEMENTS
-    # ------------------------------------------------------------------
     if add_ornaments:
-        all_tracks["__ornaments"] = (
-            build_ornament_track(
-                melody_notes,
-                skip_indices=reserved_indices,
-            )
+        all_tracks["__ornaments"] = build_ornament_track(
+            melody_notes,
+            skip_indices=reserved_indices,
         )
 
-    # ------------------------------------------------------------------
-    # SORTIE
-    # ------------------------------------------------------------------
-    out = pretty_midi.PrettyMIDI(
-        initial_tempo=tempo
-    )
+    out = pretty_midi.PrettyMIDI(initial_tempo=tempo)
 
     if keep_piano:
-        # Le piano source est conservé intégralement.
-        # Il constitue la référence musicale originale.
-        piano = pretty_midi.Instrument(
-            program=0,
-            name="Piano source",
-        )
-
-        for note in source_track.notes:
-            piano.notes.append(
-                pretty_midi.Note(
-                    velocity=note.velocity,
-                    pitch=note.pitch,
-                    start=note.start,
-                    end=note.end,
-                )
+        for source in pm.instruments:
+            if source.is_drum:
+                continue
+            copy_track = pretty_midi.Instrument(
+                program=source.program,
+                name=source.name or "Source",
             )
+            for n in source.notes:
+                copy_track.notes.append(pretty_midi.Note(
+                    velocity=n.velocity,
+                    pitch=n.pitch,
+                    start=n.start,
+                    end=n.end,
+                ))
+            out.instruments.append(copy_track)
 
-        out.instruments.append(piano)
-
-    out.instruments.extend(
-        all_tracks.values()
-    )
-
+    out.instruments.extend(all_tracks.values())
     return out
 
-
-# --------------------------------------------------------------------------
-# Rendu MP3
-# --------------------------------------------------------------------------
 
 def render_to_mp3(
     pm: pretty_midi.PrettyMIDI,
