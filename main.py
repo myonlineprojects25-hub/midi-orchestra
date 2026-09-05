@@ -569,17 +569,102 @@ def add_arpeggio_from_source(
             i += 1
 
 
+def _add_monophonic_chord_sequence(
+    track: pretty_midi.Instrument,
+    chord: List[pretty_midi.Note],
+    low: int,
+    high: int,
+    velocity: int,
+    tempo: float,
+    pattern: str = "up",
+):
+    """
+    Fait entendre TOUTES les voix du groupe source sur un instrument
+    monophonique, sous forme de petit arpège musical.
+
+    Important : une trompette, flûte ou clarinette ne peut pas jouer quatre
+    notes simultanément. On ne réduit donc plus le groupe à une seule note :
+    les 4 voix sont jouées successivement dans la durée de l'événement.
+    """
+    notes = normalize_four_voice_chord(chord)
+    if not notes:
+        return
+
+    pitches = [clamp_to_range(n.pitch, low, high) for n in notes]
+    # Supprime uniquement les doublons de hauteur, jamais les degrés distincts.
+    unique = []
+    for p in pitches:
+        if p not in unique:
+            unique.append(p)
+
+    if not unique:
+        return
+
+    if pattern == "down":
+        seq = list(reversed(unique))
+    elif pattern == "up_down" and len(unique) >= 3:
+        seq = unique + list(reversed(unique[1:-1]))
+    else:
+        seq = unique
+
+    start = chord_start(chord)
+    end = chord_end(chord)
+    duration = end - start
+
+    # Si l'accord est très court, jouer au moins une attaque par note source
+    # reste impossible physiquement ; on compresse alors proprement.
+    step = max(duration / len(seq), 0.06)
+
+    for i, pitch in enumerate(seq):
+        note_start = start + i * step
+        if note_start >= end:
+            break
+        note_end = min(end, note_start + step * 0.88)
+        add_note(
+            track,
+            pitch,
+            note_start,
+            note_end,
+            velocity,
+            low,
+            high,
+        )
+
+
+def _add_full_chord_piano(
+    track: pretty_midi.Instrument,
+    chord: List[pretty_midi.Note],
+    low: int,
+    high: int,
+    velocity: int,
+):
+    """Voicing complet des quatre voix pour les instruments polyphoniques."""
+    add_full_voicing(
+        track,
+        chord,
+        low=low,
+        high=high,
+        velocity=velocity,
+    )
+
+
 def build_solo_track(
     name: str,
     chords: List[List[pretty_midi.Note]],
     tempo: float,
 ) -> pretty_midi.Instrument:
     """
-    Construit UNE PARTIE MUSICALE COMPLÈTE pour l'instrument demandé.
+    Construit une PARTIE MUSICALE COMPLÈTE à partir des quatre voix source.
 
-    Important :
-    aucun instrument n'est maintenant alimenté par une représentation
-    réduite à la seule note supérieure du groupe.
+    Règle fondamentale de MIDI-ORCHESTRA :
+      - aucun instrument mélodique ne reçoit uniquement la soprano ;
+      - aucun instrument harmonique ne reçoit uniquement une voix intérieure ;
+      - les instruments monophoniques jouent les quatre voix sous forme
+        d'arpèges/contrechants successifs ;
+      - les instruments polyphoniques jouent le voicing complet.
+
+    Ainsi, chaque instrument sélectionné parcourt toute la progression
+    harmonique du MIDI importé.
     """
     spec = INSTRUMENTS[name]
     role = spec["role"]
@@ -589,180 +674,156 @@ def build_solo_track(
         name=spec["name"],
     )
 
-    if role == "melody_harmonic":
-        # Trompette : soprano + une couleur harmonique ponctuelle.
-        add_soprano_line(
-            track, chords,
-            low=52, high=88,
-            velocity=91,
-        )
+    for chord in chords:
+        if not chord:
+            continue
 
-        for chord in chords:
-            inner = chord_inner_notes(chord)
-            if inner:
-                note = inner[-1]
-                add_note(
-                    track,
-                    note.pitch,
-                    note.start,
-                    note.end,
-                    62,
-                    52,
-                    88,
-                )
-
-    elif role == "melody_high":
-        # Flûte : vraie soprano transposée dans son registre.
-        add_soprano_line(
-            track, chords,
-            low=67, high=98,
-            velocity=86,
-            octave_shift=1,
-        )
-
-    elif role == "harmony":
-        # Clarinette : Alto + Ténor, donc une vraie partie harmonique.
-        add_inner_voice_part(
-            track, chords,
-            low=50, high=88,
-            velocity=79,
-            use_both_inner=True,
-        )
-
-    elif role == "harmony_high":
-        # Clarinette aiguë : voix intérieures transposées d'une octave.
-        add_inner_voice_part(
-            track, chords,
-            low=72, high=98,
-            velocity=76,
-            use_both_inner=True,
-        )
-
-        # On garde une ligne de secours pour les accords à moins de 3 notes.
-        if not track.notes:
-            add_soprano_line(
-                track, chords,
-                low=72, high=98,
-                velocity=72,
-                octave_shift=1,
+        if role == "melody_high":
+            # Flûte : tous les degrés du groupe, en arpège montant,
+            # dans un registre aigu.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=67, high=98,
+                velocity=88,
+                tempo=tempo,
+                pattern="up",
             )
 
-    elif role == "melody":
-        add_soprano_line(
-            track, chords,
-            low=55, high=90,
-            velocity=88,
-        )
+        elif role == "melody":
+            # Saxophone : quatre voix sous forme de contrechant arpégé.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=52, high=88,
+                velocity=92,
+                tempo=tempo,
+                pattern="up_down",
+            )
 
-    elif role == "bass_harmony":
-        # Trombone : basse + note intérieure grave.
-        add_bass_part(
-            track, chords,
-            low=36, high=64,
-            velocity=82,
-        )
+        elif role == "melody_sparkle":
+            # Piano aigu : voicing complet, registre aigu.
+            _add_full_chord_piano(
+                track, chord,
+                low=72, high=108,
+                velocity=82,
+            )
 
-        for chord in chords:
-            inner = chord_inner_notes(chord)
-            if inner:
-                note = inner[0]
-                add_note(
-                    track,
-                    note.pitch - 12,
-                    note.start,
-                    note.end,
-                    58,
-                    36,
-                    64,
-                )
+        elif role == "harmony":
+            # Clarinette : toute l'harmonie, arpège montant/descendant.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=50, high=88,
+                velocity=84,
+                tempo=tempo,
+                pattern="up_down",
+            )
 
-    elif role == "bass":
-        add_bass_part(
-            track, chords,
-            low=28, high=55,
-            velocity=88,
-        )
+        elif role == "harmony_high":
+            # Clarinette aiguë : même matière harmonique, transposée/aiguë
+            # par le registre cible.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=67, high=100,
+                velocity=80,
+                tempo=tempo,
+                pattern="up_down",
+            )
 
-    elif role == "full_chord":
-        # Chœur et orgue : les quatre voix sont jouées ensemble.
-        for chord in chords:
-            add_full_voicing(
+        elif role == "bass_pad":
+            # Trompette/Trombone/Tuba : on ne garde plus seulement la basse.
+            # Toute la matière harmonique est parcourue dans leur registre.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=36, high=72,
+                velocity=86,
+                tempo=tempo,
+                pattern="up_down",
+            )
+
+        elif role == "pad_chord":
+            # Chœur : les quatre voix simultanément.
+            _add_full_chord_piano(
+                track, chord,
+                low=36, high=96,
+                velocity=82,
+            )
+
+        elif role == "arpeggio":
+            # Guitares : les quatre voix sont explicitement utilisées.
+            add_arpeggio_from_source(
                 track,
-                chord,
-                low=36,
-                high=96,
-                velocity=72 if name == "choir" else 78,
+                [chord],
+                tempo,
+                low=48,
+                high=92,
+                velocity=82,
             )
 
-    elif role == "arpeggio":
-        add_arpeggio_from_source(
-            track, chords, tempo,
-            low=48, high=92,
-            velocity=78,
-        )
-
-    elif role == "bass_pulse":
-        add_bass_pulse_part(
-            track, chords, tempo,
-            low=28, high=55,
-            velocity=88,
-        )
-
-    elif role == "low_voicing":
-        # Piano grave : basse + ténor, sur tout le morceau.
-        for chord in chords:
+        elif role == "bass_pulse":
+            # Basse : la fonction rythmique reste ancrée sur la basse,
+            # mais les changements d'accord sont tous parcourus.
             notes = normalize_four_voice_chord(chord)
-            if not notes:
-                continue
+            if notes:
+                bass = notes[0].pitch
+                fifth = bass + 7
+                start = chord_start(chord)
+                end = chord_end(chord)
+                beat = 60.0 / max(tempo, 40)
+                t = start
+                i = 0
+                while t < end:
+                    pitch = bass if i % 2 == 0 else fifth
+                    add_note(
+                        track,
+                        pitch,
+                        t,
+                        min(t + beat * 0.82, end),
+                        88,
+                        28,
+                        60,
+                    )
+                    t += beat
+                    i += 1
 
-            selected = notes[:2] if len(notes) >= 2 else notes
+        elif role == "full_voicing_medium":
+            # Piano medium : les quatre voix du groupe source.
+            _add_full_chord_piano(
+                track, chord,
+                low=48, high=84,
+                velocity=86,
+            )
 
-            for note in selected:
-                add_note(
-                    track,
-                    note.pitch - 12,
-                    note.start,
-                    note.end,
-                    78,
-                    28,
-                    60,
-                )
+        elif role == "low_voicing":
+            # Piano grave : basse + ténor, mais sur toute la progression.
+            notes = normalize_four_voice_chord(chord)
+            if notes:
+                for note in notes[:2]:
+                    add_note(
+                        track,
+                        note.pitch - 12,
+                        note.start,
+                        note.end,
+                        82,
+                        28,
+                        60,
+                    )
 
-    elif role == "full_voicing_medium":
-        # Piano medium : les quatre voix, replacées dans un registre central.
-        for chord in chords:
-            for note in normalize_four_voice_chord(chord):
-                add_note(
-                    track,
-                    note.pitch,
-                    note.start,
-                    note.end,
-                    82,
-                    48,
-                    84,
-                )
+        elif role == "melody_harmonic":
+            # Trompette : tous les degrés de l'accord, en petit arpège.
+            _add_monophonic_chord_sequence(
+                track, chord,
+                low=52, high=88,
+                velocity=94,
+                tempo=tempo,
+                pattern="up_down",
+            )
 
-    elif role == "high_voicing":
-        # Piano aigu : quatre voix transposées, mais conservées.
-        for chord in chords:
-            for note in normalize_four_voice_chord(chord):
-                add_note(
-                    track,
-                    note.pitch + 12,
-                    note.start,
-                    note.end,
-                    78,
-                    72,
-                    108,
-                )
-
-    elif role == "melody_sparkle":
-        add_soprano_line(
-            track, chords,
-            low=72, high=108,
-            velocity=84,
-            octave_shift=1,
-        )
+        elif role == "full_chord":
+            # Sécurité pour tout futur instrument polyphonique.
+            _add_full_chord_piano(
+                track, chord,
+                low=36, high=96,
+                velocity=80,
+            )
 
     return track
 
