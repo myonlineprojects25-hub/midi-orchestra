@@ -239,7 +239,7 @@ def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, e
     i = 0
     while t < end:
         note_end = min(t + step * 0.85, end)
-        track.notes.append(pretty_midi.Note(velocity=70, pitch=pattern[i % len(pattern)], start=t, end=note_end))
+        track.notes.append(pretty_midi.Note(velocity=92, pitch=pattern[i % len(pattern)], start=t, end=note_end))
         t += step
         i += 1
 
@@ -277,44 +277,40 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
         if role == "melody":
             for n in distinct_pitches:
                 track.notes.append(pretty_midi.Note(
-                    velocity=88, pitch=n.pitch, start=start, end=max(start + 0.3, end - 0.05)
+                    velocity=95, pitch=n.pitch, start=start, end=max(start + 0.3, end - 0.05)
                 ))
 
         elif role == "melody_high":
             for n in distinct_pitches:
                 p = clamp_to_range(n.pitch + 12, 72, 96)
-                track.notes.append(pretty_midi.Note(velocity=78, pitch=p, start=start, end=end))
+                track.notes.append(pretty_midi.Note(velocity=90, pitch=p, start=start, end=end))
 
         elif role == "melody_sparkle":
             dur = min(0.25, end - start)
             for n in distinct_pitches:
                 p = clamp_to_range(n.pitch + 12, 72, 108)
-                track.notes.append(pretty_midi.Note(velocity=82, pitch=p, start=start, end=start + dur))
+                track.notes.append(pretty_midi.Note(velocity=92, pitch=p, start=start, end=start + dur))
 
         elif role == "harmony":
             for n in distinct_pitches:
-                track.notes.append(pretty_midi.Note(velocity=80, pitch=n.pitch, start=start, end=end))
+                track.notes.append(pretty_midi.Note(velocity=88, pitch=n.pitch, start=start, end=end))
 
         elif role == "harmony_high":
             for n in distinct_pitches:
                 p = clamp_to_range(n.pitch + 12, 72, 96)
-                track.notes.append(pretty_midi.Note(velocity=76, pitch=p, start=start, end=end))
+                track.notes.append(pretty_midi.Note(velocity=88, pitch=p, start=start, end=end))
 
         elif role == "bass_pad":
             p = clamp_to_range(bass.pitch - 12, 24, 48)
-            track.notes.append(pretty_midi.Note(velocity=65, pitch=p, start=start, end=end))
+            track.notes.append(pretty_midi.Note(velocity=86, pitch=p, start=start, end=end))
 
         elif role == "pad_chord":
-            # Transposé une octave au-dessus et allégé (hauteurs distinctes
-            # seulement, volume réduit) pour ne pas se fondre en masse avec
-            # la piste originale qui joue les mêmes accords en dessous.
-            seen_pcs = set()
-            for n in pitches:
-                if n.pitch % 12 in seen_pcs:
-                    continue
-                seen_pcs.add(n.pitch % 12)
+            # Toutes les notes réelles de l'accord, à bon volume : plus
+            # besoin de l'alléger, le MIDI original n'est plus dans la
+            # sortie pour qu'il faille s'en distinguer.
+            for n in distinct_pitches:
                 p = clamp_to_range(n.pitch + 12, 60, 96)
-                track.notes.append(pretty_midi.Note(velocity=42, pitch=p, start=start, end=end))
+                track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=start, end=end))
 
         elif role == "arpeggio":
             build_arpeggio_notes(track, pitches, start, end, beat)
@@ -324,7 +320,7 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
             t = start
             while t < end:
                 note_end = min(t + beat * 0.9, end)
-                track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=t, end=note_end))
+                track.notes.append(pretty_midi.Note(velocity=88, pitch=p, start=t, end=note_end))
                 t += beat
 
     return track
@@ -354,7 +350,7 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
             pitch = clamp_to_range(pitch - 12, 24, 48)
 
         track.notes.append(pretty_midi.Note(
-            velocity=max(60, min(110, n.velocity or 85)),
+            velocity=max(80, min(115, n.velocity or 88)),
             pitch=pitch,
             start=n.start,
             end=max(end, n.start + 0.05),
