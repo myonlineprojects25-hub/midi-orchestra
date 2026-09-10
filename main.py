@@ -71,8 +71,8 @@ INSTRUMENTS = {
     "trombone":        {"program": 57, "name": "Trombone",         "role": "bass_pad"},
     "tuba":            {"program": 58, "name": "Tuba",             "role": "bass_pad"},
     "organ":           {"program": 19, "name": "Organ",            "role": "melody"},
-    "choir":           {"program": 72, "name": "Choir",            "role": "pad_chord"},
-    "guitar":          {"program": 45, "name": "Guitar",           "role": "arpeggio"},
+    "choir":           {"program": 52, "name": "Choir",            "role": "pad_chord"},
+    "guitar":          {"program": 25, "name": "Guitar",           "role": "arpeggio"},
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
     "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
     "piano_low":       {"program": 0,  "name": "Piano (grave)",    "role": "bass_pulse"},
@@ -103,7 +103,7 @@ ROLL_TYPES = {"snare", "toms", "crescendo", "double"}
 RESPONSE_INSTRUMENTS = {
     "clarinet": 71,
     "flute": 73,
-    "guitar": 45,
+    "guitar": 25,
     "piano_high": 0,
 }
 
