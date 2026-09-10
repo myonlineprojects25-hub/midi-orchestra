@@ -88,13 +88,12 @@ INSTRUMENT_ALIASES = {
 }
 
 # Associe le rôle d'un instrument à la voix SATB réelle qu'il doit doubler
-# quand le fichier d'entrée fournit des voix nommées.
+# quand le fichier d'entrée fournit des voix nommées. Seuls les instruments
+# au timbre réellement grave restent dédiés à la voix de Basse seule — tous
+# les autres rôles (mélodie/harmonie) jouent désormais l'accord complet à 4
+# notes réelles via build_solo_track, pour ne jamais restreindre un
+# instrument à une seule voix isolée.
 VOICE_FOR_ROLE = {
-    "melody": "soprano",
-    "melody_high": "soprano",
-    "melody_sparkle": "soprano",
-    "harmony": "alto",
-    "harmony_high": "alto",
     "bass_pad": "bass",
     "bass_pulse": "bass",
 }
@@ -264,37 +263,42 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
         melody = pitches[-1]
         inner = pitches[1:-1]
 
+        # Notes distinctes de l'accord (dédoublonnées par hauteur), pour que
+        # chaque instrument mélodique/harmonique porte bien les VRAIES 4
+        # notes de l'harmonie (Soprano+Alto+Tenor+Basse quand elles existent)
+        # à volume comparable, plutôt qu'une seule voix isolée.
+        distinct_pitches = []
+        seen_pitches = set()
+        for n in pitches:
+            if n.pitch not in seen_pitches:
+                seen_pitches.add(n.pitch)
+                distinct_pitches.append(n)
+
         if role == "melody":
-            track.notes.append(pretty_midi.Note(
-                velocity=95, pitch=melody.pitch, start=start, end=max(start + 0.3, end - 0.05)
-            ))
-
-        elif role == "melody_high":
-            p = clamp_to_range(melody.pitch + 12, 72, 96)
-            track.notes.append(pretty_midi.Note(velocity=80, pitch=p, start=start, end=end))
-
-        elif role == "melody_sparkle":
-            p = clamp_to_range(melody.pitch + 12, 72, 108)
-            dur = min(0.25, end - start)
-            track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=start, end=start + dur))
-
-        elif role == "harmony":
-            if inner:
-                for n in inner:
-                    track.notes.append(pretty_midi.Note(velocity=75, pitch=n.pitch, start=start, end=end))
-            else:
+            for n in distinct_pitches:
                 track.notes.append(pretty_midi.Note(
-                    velocity=70, pitch=max(melody.pitch - 12, 0), start=start, end=end
+                    velocity=88, pitch=n.pitch, start=start, end=max(start + 0.3, end - 0.05)
                 ))
 
+        elif role == "melody_high":
+            for n in distinct_pitches:
+                p = clamp_to_range(n.pitch + 12, 72, 96)
+                track.notes.append(pretty_midi.Note(velocity=78, pitch=p, start=start, end=end))
+
+        elif role == "melody_sparkle":
+            dur = min(0.25, end - start)
+            for n in distinct_pitches:
+                p = clamp_to_range(n.pitch + 12, 72, 108)
+                track.notes.append(pretty_midi.Note(velocity=82, pitch=p, start=start, end=start + dur))
+
+        elif role == "harmony":
+            for n in distinct_pitches:
+                track.notes.append(pretty_midi.Note(velocity=80, pitch=n.pitch, start=start, end=end))
+
         elif role == "harmony_high":
-            if inner:
-                for n in inner:
-                    p = clamp_to_range(n.pitch + 12, 72, 96)
-                    track.notes.append(pretty_midi.Note(velocity=72, pitch=p, start=start, end=end))
-            else:
-                p = clamp_to_range(melody.pitch + 12, 72, 96)
-                track.notes.append(pretty_midi.Note(velocity=68, pitch=p, start=start, end=end))
+            for n in distinct_pitches:
+                p = clamp_to_range(n.pitch + 12, 72, 96)
+                track.notes.append(pretty_midi.Note(velocity=76, pitch=p, start=start, end=end))
 
         elif role == "bass_pad":
             p = clamp_to_range(bass.pitch - 12, 24, 48)
@@ -848,7 +852,7 @@ def orchestrate(
     responses: List[str],
     add_rhythm: bool,
     add_ornaments: bool,
-    keep_piano: bool = True,
+    keep_piano: bool = False,
 ) -> pretty_midi.PrettyMIDI:
     if not pm.instruments:
         raise ValueError("Aucune piste trouvée dans le fichier MIDI.")
@@ -983,7 +987,11 @@ async def orchestrate_endpoint(
     responses: str = "",
     add_rhythm: bool = False,
     add_ornaments: bool = False,
-    keep_piano: bool = True,
+    # Le MIDI importé ne doit jamais être audible en sortie par défaut —
+    # seuls les instruments choisis doivent s'entendre. keep_piano reste
+    # disponible pour un usage API explicite, mais n'est pas exposé dans le
+    # formulaire et ne doit pas être activé par défaut.
+    keep_piano: bool = False,
     format: str = "mp3",
 ):
     if x_api_key != API_KEY:
