@@ -301,8 +301,16 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
             track.notes.append(pretty_midi.Note(velocity=65, pitch=p, start=start, end=end))
 
         elif role == "pad_chord":
+            # Transposé une octave au-dessus et allégé (hauteurs distinctes
+            # seulement, volume réduit) pour ne pas se fondre en masse avec
+            # la piste originale qui joue les mêmes accords en dessous.
+            seen_pcs = set()
             for n in pitches:
-                track.notes.append(pretty_midi.Note(velocity=55, pitch=n.pitch, start=start, end=end))
+                if n.pitch % 12 in seen_pcs:
+                    continue
+                seen_pcs.add(n.pitch % 12)
+                p = clamp_to_range(n.pitch + 12, 60, 96)
+                track.notes.append(pretty_midi.Note(velocity=42, pitch=p, start=start, end=end))
 
         elif role == "arpeggio":
             build_arpeggio_notes(track, pitches, start, end, beat)
@@ -806,6 +814,32 @@ def build_response_tracks(
 # Assemblage
 # --------------------------------------------------------------------------
 
+def _scale_velocity(notes: List[pretty_midi.Note], factor: float):
+    for n in notes:
+        n.velocity = max(1, min(127, int(round((n.velocity or 80) * factor))))
+
+
+def _set_pan(instrument: pretty_midi.Instrument, pan_value: int):
+    """pan_value: 0 (gauche) - 64 (centre) - 127 (droite), via CC10."""
+    try:
+        instrument.control_changes.append(
+            pretty_midi.ControlChange(number=10, value=max(0, min(127, pan_value)), time=0.0)
+        )
+    except Exception:
+        pass  # certains environnements de test n'ont pas ControlChange, sans conséquence
+
+
+# Panoramique déterministe par instrument, pour que des voix ajoutées aux
+# hauteurs proches de la piste originale restent distinctes à l'oreille
+# même quand le volume seul ne suffit pas à les séparer.
+_PAN_BY_NAME = {
+    "trumpet": 100, "flute": 30, "clarinet": 40, "clarinet_high": 20,
+    "saxophone": 92, "trombone": 105, "tuba": 112, "organ": 64,
+    "choir": 64, "guitar": 25, "bass_guitar": 64, "electric_guitar": 35,
+    "piano_low": 64, "piano_medium": 64, "piano_high": 50,
+}
+
+
 def orchestrate(
     pm: pretty_midi.PrettyMIDI,
     instruments: List[str],
@@ -860,6 +894,14 @@ def orchestrate(
     if add_ornaments:
         all_tracks["__ornaments"] = build_ornament_track(melody_notes, skip_indices=reserved_indices)
 
+    # Panoramique déterministe par instrument ajouté, pour rester distinct
+    # de la piste originale même quand les hauteurs se recoupent.
+    for track_name, track in all_tracks.items():
+        pan = _PAN_BY_NAME.get(track_name)
+        if pan is None and track_name.startswith("__response_"):
+            pan = _PAN_BY_NAME.get(track_name.replace("__response_", ""), 64)
+        _set_pan(track, 64 if pan is None else pan)
+
     out = pretty_midi.PrettyMIDI(initial_tempo=tempo)
 
     if keep_piano:
@@ -867,11 +909,18 @@ def orchestrate(
             for voice_name, notes in satb.items():
                 v = pretty_midi.Instrument(program=0, name=voice_name.capitalize())
                 v.notes = sorted(notes, key=lambda n: n.start)
+                # Volume réduit : la piste originale doit servir de
+                # fondation discrète, pas rivaliser à égalité avec les
+                # instruments ajoutés (c'est ça qui créait l'effet "fondu").
+                _scale_velocity(v.notes, 0.62)
+                _set_pan(v, 64)
                 out.instruments.append(v)
         else:
             piano = pm.instruments[0]
             piano.program = 0
             piano.name = "Piano"
+            _scale_velocity(piano.notes, 0.62)
+            _set_pan(piano, 64)
             out.instruments.append(piano)
 
     out.instruments.extend(all_tracks.values())
