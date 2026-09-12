@@ -113,6 +113,12 @@ RESPONSE_INSTRUMENTS = {
     "clarinet": 71,
     "flute": 73,
     "guitar": 25,
+    # Mêmes caractéristiques de réponse que "guitar" (registre, nombre de
+    # notes, vélocité — voir _response_register, build_response_tracks) ;
+    # seul le programme General MIDI change (24 = guitare nylon, contre
+    # 25 = guitare acier pour "guitar"), pour le même son de corde que la
+    # piste principale "classical_guitar" dans INSTRUMENTS.
+    "classical_guitar": 24,
     "piano_high": 0,
 }
 
@@ -731,6 +737,7 @@ def _response_register(name: str):
         "clarinet": (55, 88),
         "flute": (67, 98),
         "guitar": (52, 84),
+        "classical_guitar": (52, 84),
         "piano_high": (72, 105),
     }.get(name, (55, 88))
 
@@ -879,7 +886,7 @@ def build_response_tracks(
                 target = candidate
                 break
 
-        count = {"clarinet": 4, "flute": 4, "guitar": 5, "piano_high": 4}.get(name, 4)
+        count = {"clarinet": 4, "flute": 4, "guitar": 5, "classical_guitar": 5, "piano_high": 4}.get(name, 4)
         if response_index % 5 == 0:
             count += 1
         count = max(3, min(6, count))
@@ -892,7 +899,7 @@ def build_response_tracks(
         if len(events) != len(arp):
             continue
 
-        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104, "piano_high": 96}.get(name, 98)
+        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104, "classical_guitar": 104, "piano_high": 96}.get(name, 98)
 
         for i, (pitch, (note_start, duration)) in enumerate(zip(arp, events)):
             frac = i / max(1, len(arp) - 1)
