@@ -27,6 +27,7 @@ import struct
 import tempfile
 import wave
 from typing import List
+from urllib.parse import quote
 
 import pretty_midi
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -839,19 +840,6 @@ def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
         return data
 
 
-def mp3_content_disposition(filename: str) -> str:
-    """Construit un Content-Disposition compatible HTTP pour les noms UTF-8."""
-    from urllib.parse import quote
-    ascii_filename = filename.encode("ascii", "ignore").decode("ascii")
-    if not ascii_filename:
-        ascii_filename = "orchestration.mp3"
-    encoded_filename = quote(filename, safe="")
-    return (
-        f'inline; filename="{ascii_filename}"; '
-        f"filename*=UTF-8''{encoded_filename}"
-    )
-
-
 def safe_output_basename(original_filename: str) -> str:
     base = os.path.splitext(original_filename or "orchestration")[0]
     base = "".join(c for c in base if c.isalnum() or c in (" ", "-", "_")).strip()
@@ -884,9 +872,10 @@ async def orchestrate_endpoint(
 
     original_name = file.filename or "orchestration.mid"
     out_basename = safe_output_basename(original_name)
+
     instrument_names = [INSTRUMENTS[name]["name"] for name in instruments if name in INSTRUMENTS]
     if instrument_names:
-        out_basename = f"{os.path.splitext(out_basename)[0]} {' - '.join(instrument_names)}"
+        out_basename = f"{out_basename} {' - '.join(instrument_names)}"
 
     raw = await file.read()
     try:
@@ -938,7 +927,10 @@ async def orchestrate_endpoint(
         media_type="audio/mpeg",
         headers={
             "Content-Length": str(len(mp3_bytes)),
-            "Content-Disposition": mp3_content_disposition(f"{out_basename}.mp3"),
+            "Content-Disposition": (
+                f'inline; filename="{out_basename.encode("ascii", "ignore").decode("ascii")}.mp3"; '
+                f"filename*=UTF-8''{quote(out_basename + '.mp3', safe='')}"
+            ),
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
             "X-Detected-Tempo": f"{detected_tempo:.1f}",
