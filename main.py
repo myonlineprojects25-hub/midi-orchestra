@@ -294,7 +294,7 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     """
     spec = INSTRUMENTS[name]
     role = spec["role"]
-    track = pretty_midi.Instrument(program=spec["program"], name=spec["name"])
+    track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
     beat = 60.0 / max(tempo, 40)
 
     for chord in chords:
@@ -377,7 +377,7 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
     """
     spec = INSTRUMENTS[name]
     role = spec["role"]
-    track = pretty_midi.Instrument(program=spec["program"], name=spec["name"])
+    track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
 
     for n in sorted(voice_notes, key=lambda x: x.start):
         pitch = n.pitch
