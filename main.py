@@ -266,6 +266,13 @@ def clamp_to_range(pitch: int, low: int, high: int) -> int:
     return max(0, min(127, p))
 
 
+# Vélocité de la note principale de l'arpège de la guitare acoustique
+# (voir build_arpeggio_notes). Réutilisée telle quelle pour la guitare
+# basse, à la demande explicite de l'utilisateur, afin que les deux
+# guitares restent au même volume l'une par rapport à l'autre.
+GUITAR_PRINCIPAL_VELOCITY = 104
+
+
 def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, end: float, beat: float):
     """
     Décompose l'accord en pattern rythmique (comping guitare) plutôt qu'un
@@ -293,7 +300,7 @@ def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, e
     inner = base[min(1, len(base) - 1)]
     bass = base[0]
     pattern = [principal, inner, bass, inner]
-    velocities = [104, 88, 88, 88]
+    velocities = [GUITAR_PRINCIPAL_VELOCITY, 88, 88, 88]
 
     step = beat / 2
     t = start
@@ -391,10 +398,15 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
 
         elif role == "bass_pulse":
             p = clamp_to_range(bass.pitch - 12, 24, 48)
+            # La guitare basse doit sonner au même volume que la note
+            # principale de la guitare acoustique ; les autres instruments
+            # à pulsation grave (ex: piano grave) gardent leur vélocité
+            # d'origine, inchangée.
+            velocity = GUITAR_PRINCIPAL_VELOCITY if name == "bass_guitar" else 88
             t = start
             while t < end:
                 note_end = min(t + beat * 0.9, end)
-                track.notes.append(pretty_midi.Note(velocity=88, pitch=p, start=t, end=note_end))
+                track.notes.append(pretty_midi.Note(velocity=velocity, pitch=p, start=t, end=note_end))
                 t += beat
 
     return track
@@ -423,8 +435,20 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
         elif role in ("bass_pad", "bass_pulse"):
             pitch = clamp_to_range(pitch - 12, 24, 48)
 
+        if name == "bass_guitar":
+            # Même volume fixe que la note principale de la guitare
+            # acoustique, plutôt que la vélocité dynamique héritée de la
+            # voix de Basse d'origine — pour que les deux guitares restent
+            # équilibrées entre elles quelle que soit la dynamique du
+            # chant choral source. Les autres instruments qui doublent une
+            # voix (trompette, trombone, tuba, piano grave...) gardent leur
+            # comportement dynamique d'origine, inchangé.
+            velocity = GUITAR_PRINCIPAL_VELOCITY
+        else:
+            velocity = max(80, min(115, n.velocity or 88))
+
         track.notes.append(pretty_midi.Note(
-            velocity=max(80, min(115, n.velocity or 88)),
+            velocity=velocity,
             pitch=pitch,
             start=n.start,
             end=max(end, n.start + 0.05),
