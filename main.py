@@ -1014,6 +1014,17 @@ def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
 # tous les caractères Unicode (accents, œ, etc.) sont conservés tels quels.
 _FORBIDDEN_FILENAME_CHARS = set('/\\:*?"<>|')
 
+# Caractères de contrôle (CR, LF, tabulation, etc. — points de code U+0000
+# à U+001F, plus U+007F). Sans lien avec "Chœur" lui-même, mais ce filtre
+# devient nécessaire maintenant que l'en-tête Content-Disposition construit
+# ici est relayé TEL QUEL par n8n puis par le proxy PHP, sans plus jamais
+# être reconstruit en aval : un nom de fichier MIDI importé contenant un
+# retour à la ligne se propagerait alors littéralement dans l'en-tête HTTP
+# final (au mieux un rejet par le serveur ASGI, au pire un début
+# d'injection d'en-tête). On l'assainit donc ici, à la source, une bonne
+# fois pour toutes.
+_CONTROL_CHARS = {chr(c) for c in range(0x00, 0x20)} | {chr(0x7F)}
+
 
 def build_output_basename(original_filename: str, instrument_names: List[str]) -> str:
     """
@@ -1028,7 +1039,9 @@ def build_output_basename(original_filename: str, instrument_names: List[str]) -
     est stocké et manipulé en str Python, donc nativement en UTF-8. Seul
     l'encodage de l'en-tête HTTP Content-Disposition doit être géré à part
     (voir `content_disposition_header`), car cet en-tête n'accepte pas
-    l'UTF-8 brut.
+    l'UTF-8 brut. Les caractères de contrôle (CR/LF compris) sont en
+    revanche toujours retirés ici, car eux n'ont pas leur place dans un nom
+    de fichier ni dans un en-tête HTTP, quel que soit l'encodage.
     """
     base = os.path.splitext(original_filename or "orchestration")[0].strip()
     if not base:
@@ -1038,7 +1051,10 @@ def build_output_basename(original_filename: str, instrument_names: List[str]) -
     suffix = " - ".join(labels)
 
     full = f"{base} {suffix}" if suffix else base
-    full = "".join(c for c in full if c not in _FORBIDDEN_FILENAME_CHARS).strip()
+    full = "".join(
+        c for c in full
+        if c not in _FORBIDDEN_FILENAME_CHARS and c not in _CONTROL_CHARS
+    ).strip()
 
     return full or "orchestration"
 
@@ -1065,6 +1081,9 @@ def content_disposition_header(disposition: str, filename: str) -> str:
       même sans connaître la RFC 5987.
     - `filename*=UTF-8''...` (RFC 5987) : la version pourcent-encodée, pour
       les clients strictement conformes qui privilégient ce paramètre.
+
+    `filename` est supposé déjà assaini de tout caractère de contrôle par
+    `build_output_basename` — cette fonction ne le revérifie pas.
     """
     utf8_bytes = filename.encode("utf-8")
     mojibake_filename = utf8_bytes.decode("latin-1")  # 1 octet -> 1 point de code (0-255), toujours valide
