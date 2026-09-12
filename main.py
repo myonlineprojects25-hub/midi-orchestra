@@ -983,10 +983,7 @@ async def orchestrate_endpoint(
     responses: str = "",
     add_rhythm: bool = False,
     add_ornaments: bool = False,
-    # Le MIDI importé ne doit jamais être audible en sortie par défaut —
-    # seuls les instruments choisis doivent s'entendre. keep_piano reste
-    # disponible pour un usage API explicite, mais n'est pas exposé dans le
-    # formulaire et ne doit pas être activé par défaut.
+    output_filename: str = "",
     keep_piano: bool = False,
     format: str = "mp3",
 ):
@@ -1002,7 +999,12 @@ async def orchestrate_endpoint(
         add_rhythm = True
 
     original_name = file.filename or "orchestration.mid"
-    out_basename = safe_output_basename(original_name)
+    
+    # Utilise output_filename s'il est fourni ET non vide, sinon traitement existant
+    if output_filename and output_filename.strip():
+        out_basename = output_filename.replace(".mp3", "").replace(".mid", "").strip()
+    else:
+        out_basename = safe_output_basename(original_name)
 
     raw = await file.read()
     try:
