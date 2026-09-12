@@ -25,7 +25,8 @@ Dans les deux cas, le résultat est enrichi avec :
   réel ou accord tenu), pas à intervalles mécaniques fixes.
 
 Le résultat est rendu directement en MP3 via FluidSynth + lame, et le nom
-du fichier reprend celui du MIDI importé (+ "_Orchestrated.mp3").
+du fichier reprend celui du MIDI importé, suivi du ou des instruments
+choisis par l'utilisateur (ex: "H322 Piano medium - Clarinette.mp3").
 """
 
 import io
@@ -37,6 +38,7 @@ import tempfile
 import unicodedata
 import wave
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import pretty_midi
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -71,7 +73,7 @@ INSTRUMENTS = {
     "trombone":        {"program": 57, "name": "Trombone",         "role": "bass_pad"},
     "tuba":            {"program": 58, "name": "Tuba",             "role": "bass_pad"},
     "organ":           {"program": 19, "name": "Organ",            "role": "melody"},
-    "choir":           {"program": 52, "name": "Choir",            "role": "pad_chord"},
+    "choir":           {"program": 52, "name": "Chœur",            "role": "pad_chord"},
     "guitar":          {"program": 25, "name": "Guitar",           "role": "arpeggio"},
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
     "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
@@ -967,10 +969,52 @@ def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
         return data
 
 
-def safe_output_basename(original_filename: str) -> str:
-    base = os.path.splitext(original_filename or "orchestration")[0]
-    base = "".join(c for c in base if c.isalnum() or c in (" ", "-", "_")).strip()
-    return (base or "orchestration") + "_Orchestrated"
+# Caractères strictement interdits dans un nom de fichier (séparateurs de
+# chemin, guillemets...). On ne restreint plus aux caractères ASCII/isalnum :
+# tous les caractères Unicode (accents, œ, etc.) sont conservés tels quels.
+_FORBIDDEN_FILENAME_CHARS = set('/\\:*?"<>|')
+
+
+def build_output_basename(original_filename: str, instrument_names: List[str]) -> str:
+    """
+    Construit le nom du fichier de sortie : nom du MIDI importé, suivi du
+    ou des instruments choisis par l'utilisateur dans le pré-filtrage,
+    séparés par " - " quand il y en a plusieurs.
+
+    Exemple : fichier "H322.mid" + instruments ["piano_medium", "clarinet"]
+    -> "H322 Piano (medium) - Clarinet".
+
+    Le nom garde ses caractères Unicode d'origine (accents, œ, etc.) ; il
+    est stocké et manipulé en str Python, donc nativement en UTF-8. Seul
+    l'encodage de l'en-tête HTTP Content-Disposition doit être géré à part
+    (voir `content_disposition_header`), car cet en-tête n'accepte pas
+    l'UTF-8 brut.
+    """
+    base = os.path.splitext(original_filename or "orchestration")[0].strip()
+    if not base:
+        base = "orchestration"
+
+    labels = [INSTRUMENTS[name]["name"] for name in instrument_names if name in INSTRUMENTS]
+    suffix = " - ".join(labels)
+
+    full = f"{base} {suffix}" if suffix else base
+    full = "".join(c for c in full if c not in _FORBIDDEN_FILENAME_CHARS).strip()
+
+    return full or "orchestration"
+
+
+def content_disposition_header(disposition: str, filename: str) -> str:
+    """
+    Construit un en-tête Content-Disposition qui préserve correctement les
+    caractères Unicode du nom de fichier (accents, œ, etc.), conformément
+    à la RFC 5987/6266 : le paramètre `filename*` porte le nom encodé en
+    UTF-8 (pourcent-encodé), et `filename` reste un repli ASCII pour les
+    clients qui ne liraient pas `filename*`.
+    """
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii").strip()
+    ascii_fallback = ascii_fallback.replace('"', "'") or "orchestration"
+    encoded_utf8 = quote(filename, safe="")
+    return f'{disposition}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
 @app.post("/orchestrate")
@@ -1002,7 +1046,7 @@ async def orchestrate_endpoint(
         add_rhythm = True
 
     original_name = file.filename or "orchestration.mid"
-    out_basename = safe_output_basename(original_name)
+    out_basename = build_output_basename(original_name, instruments)
 
     raw = await file.read()
     try:
@@ -1039,7 +1083,7 @@ async def orchestrate_endpoint(
             content=data,
             media_type="audio/midi",
             headers={
-                "Content-Disposition": f'attachment; filename="{out_basename}.mid"',
+                "Content-Disposition": content_disposition_header("attachment", f"{out_basename}.mid"),
                 "X-Detected-Tempo": f"{detected_tempo:.1f}",
             },
         )
@@ -1056,7 +1100,7 @@ async def orchestrate_endpoint(
         media_type="audio/mpeg",
         headers={
             "Content-Length": str(len(mp3_bytes)),
-            "Content-Disposition": f'inline; filename="{out_basename}.mp3"',
+            "Content-Disposition": content_disposition_header("inline", f"{out_basename}.mp3"),
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
             "X-Detected-Tempo": f"{detected_tempo:.1f}",
