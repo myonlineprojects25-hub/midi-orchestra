@@ -30,11 +30,13 @@ choisis par l'utilisateur (ex: "H322 Piano medium - Clarinette.mp3").
 """
 
 import io
+import logging
 import os
 import shutil
 import subprocess
 import struct
 import tempfile
+import traceback
 import unicodedata
 import wave
 from typing import Dict, List, Optional, Tuple
@@ -43,6 +45,10 @@ from urllib.parse import quote
 import pretty_midi
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import Response
+
+logger = logging.getLogger("midi_orchestrator")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="MIDI Orchestrator")
 
@@ -1052,6 +1058,7 @@ async def orchestrate_endpoint(
     try:
         pm = pretty_midi.PrettyMIDI(io.BytesIO(raw))
     except Exception as e:
+        logger.error("Échec de lecture du MIDI '%s': %s\n%s", original_name, e, traceback.format_exc())
         raise HTTPException(status_code=400, detail=f"Fichier MIDI invalide: {e}")
 
     try:
@@ -1073,6 +1080,10 @@ async def orchestrate_endpoint(
             keep_piano=keep_piano,
         )
     except Exception as e:
+        logger.error(
+            "Échec d'orchestration '%s' (instruments=%s, style=%s): %s\n%s",
+            original_name, instruments, style, e, traceback.format_exc(),
+        )
         raise HTTPException(status_code=500, detail=f"Erreur d'orchestration: {e}")
 
     if format == "midi":
@@ -1091,8 +1102,10 @@ async def orchestrate_endpoint(
     try:
         mp3_bytes = render_to_mp3(result)
     except subprocess.TimeoutExpired:
+        logger.error("Timeout du rendu audio pour '%s'", original_name)
         raise HTTPException(status_code=504, detail="Le rendu audio a dépassé le temps imparti.")
     except Exception as e:
+        logger.error("Échec de rendu audio pour '%s': %s\n%s", original_name, e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Erreur de rendu audio: {e}")
 
     return Response(
