@@ -267,21 +267,41 @@ def clamp_to_range(pitch: int, low: int, high: int) -> int:
 
 
 def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, end: float, beat: float):
-    """Décompose l'accord en pattern rythmique (comping guitare) plutôt qu'un plaqué."""
+    """
+    Décompose l'accord en pattern rythmique (comping guitare) plutôt qu'un
+    plaqué.
+
+    La note principale (`base[-1]`, la plus aiguë de l'accord — c'est-à-dire
+    la voix mélodique quand les données proviennent d'un SATB) est toujours
+    placée en TÊTE du motif (index 0) et reçoit une vélocité plus marquée.
+
+    Avant ce correctif, le motif plaçait la note principale en 3e position
+    (`[basse, intérieure, MÉLODIE, intérieure]`), ce qui la rendait
+    silencieuse dès que le segment harmonique était trop court pour boucler
+    jusque-là. Sur un fichier SATB, les voix bougent indépendamment
+    (notes de passage, suspensions) : `group_notes_into_chords` crée alors
+    un nouvel accord à chaque mouvement de voix, ce qui produit de très
+    nombreux segments ne durant qu'un demi-temps — assez pour une seule
+    itération du motif. Avec l'ancien ordre, cette unique itération jouait
+    systématiquement la note la MOINS importante (la basse, garantie en
+    position 0) et sacrifiait la mélodie. En mettant la mélodie en position
+    0, elle est désormais garantie dès la première itération, quelle que
+    soit la durée du segment.
+    """
     base = [n.pitch for n in pitches]
-    pattern = [base[0]]
-    if len(base) > 1:
-        pattern.append(base[min(1, len(base) - 1)])
-    pattern.append(base[-1])
-    if len(base) > 1:
-        pattern.append(base[min(1, len(base) - 1)])
+    principal = base[-1]
+    inner = base[min(1, len(base) - 1)]
+    bass = base[0]
+    pattern = [principal, inner, bass, inner]
+    velocities = [104, 88, 88, 88]
 
     step = beat / 2
     t = start
     i = 0
     while t < end:
         note_end = min(t + step * 0.85, end)
-        track.notes.append(pretty_midi.Note(velocity=92, pitch=pattern[i % len(pattern)], start=t, end=note_end))
+        idx = i % len(pattern)
+        track.notes.append(pretty_midi.Note(velocity=velocities[idx], pitch=pattern[idx], start=t, end=note_end))
         t += step
         i += 1
 
