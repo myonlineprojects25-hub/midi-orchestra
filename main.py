@@ -80,7 +80,8 @@ INSTRUMENTS = {
     "tuba":            {"program": 58, "name": "Tuba",             "role": "bass_pad"},
     "organ":           {"program": 19, "name": "Organ",            "role": "melody"},
     "choir":           {"program": 52, "name": "Chœur",            "role": "pad_chord"},
-    "guitar":          {"program": 25, "name": "Guitar",           "role": "arpeggio"},
+    "guitar":          {"program": 25, "name": "Guitare Acoustique", "role": "arpeggio"},
+    "classical_guitar": {"program": 24, "name": "Guitare Classique", "role": "arpeggio"},
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
     "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
     "piano_low":       {"program": 0,  "name": "Piano (grave)",    "role": "bass_pulse"},
@@ -933,7 +934,7 @@ def _set_pan(instrument: pretty_midi.Instrument, pan_value: int):
 _PAN_BY_NAME = {
     "trumpet": 100, "flute": 30, "clarinet": 40, "clarinet_high": 20,
     "saxophone": 92, "trombone": 105, "tuba": 112, "organ": 64,
-    "choir": 64, "guitar": 25, "bass_guitar": 64, "electric_guitar": 35,
+    "choir": 64, "guitar": 25, "classical_guitar": 103, "bass_guitar": 64, "electric_guitar": 35,
     "piano_low": 64, "piano_medium": 64, "piano_high": 50,
 }
 
