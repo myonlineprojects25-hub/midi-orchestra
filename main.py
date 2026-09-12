@@ -1012,15 +1012,31 @@ def build_output_basename(original_filename: str, instrument_names: List[str]) -
 def content_disposition_header(disposition: str, filename: str) -> str:
     """
     Construit un en-tête Content-Disposition qui préserve correctement les
-    caractères Unicode du nom de fichier (accents, œ, etc.), conformément
-    à la RFC 5987/6266 : le paramètre `filename*` porte le nom encodé en
-    UTF-8 (pourcent-encodé), et `filename` reste un repli ASCII pour les
-    clients qui ne liraient pas `filename*`.
+    caractères Unicode du nom de fichier (accents, œ, etc.).
+
+    Le protocole HTTP impose que les valeurs d'en-tête soient encodables en
+    Latin-1. On ne peut donc jamais y placer le texte Unicode complet tel
+    quel (ex: "œ" provoquerait une UnicodeEncodeError à l'encodage Latin-1).
+
+    On fournit donc DEUX représentations, pour couvrir aussi bien les
+    clients stricts que les clients simplistes qui ignorent `filename*` :
+
+    - `filename="..."` : les octets UTF-8 du nom, réinterprétés un par un
+      comme des caractères Latin-1 (technique standard, utilisée par
+      Flask/Werkzeug et Django). Chaque octet UTF-8 (0-255) a un point de
+      code Latin-1 valide, donc cette conversion ne lève jamais d'erreur
+      d'encodage, et les octets qui transitent réellement sur le réseau
+      sont bien les octets UTF-8 d'origine — la plupart des navigateurs
+      et des clients HTTP décodent alors correctement le nom en UTF-8,
+      même sans connaître la RFC 5987.
+    - `filename*=UTF-8''...` (RFC 5987) : la version pourcent-encodée, pour
+      les clients strictement conformes qui privilégient ce paramètre.
     """
-    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii").strip()
-    ascii_fallback = ascii_fallback.replace('"', "'") or "orchestration"
+    utf8_bytes = filename.encode("utf-8")
+    mojibake_filename = utf8_bytes.decode("latin-1")  # 1 octet -> 1 point de code (0-255), toujours valide
+    quoted_filename = mojibake_filename.replace('"', "'")
     encoded_utf8 = quote(filename, safe="")
-    return f'{disposition}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_utf8}'
+    return f'{disposition}; filename="{quoted_filename}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
 @app.post("/orchestrate")
