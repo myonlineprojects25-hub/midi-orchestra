@@ -297,7 +297,7 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
     beat = 60.0 / max(tempo, 40)
 
-    for chord in chords:
+    for idx, chord in enumerate(chords):
         pitches = sorted(chord, key=lambda n: n.pitch)
         start = min(n.start for n in chord)
         end = max(n.end for n in chord)
@@ -355,7 +355,19 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
                 track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=start, end=end))
 
         elif role == "arpeggio":
-            build_arpeggio_notes(track, pitches, start, end, beat)
+            # L'arpège doit rester continu même quand le MIDI source a une
+            # pause ou un changement de phrase à cet endroit (silence entre
+            # la fin réelle de l'accord et le début du suivant) : on
+            # prolonge donc son point d'arrêt jusqu'au début de l'accord
+            # suivant plutôt que jusqu'à la fin réelle des notes en cours.
+            # Pour le tout dernier accord, il n'y a pas de "suivant" à
+            # rejoindre : on garde alors sa propre fin.
+            if idx + 1 < len(chords):
+                next_start = min(n.start for n in chords[idx + 1])
+                arp_end = max(end, next_start)
+            else:
+                arp_end = end
+            build_arpeggio_notes(track, pitches, start, arp_end, beat)
 
         elif role == "bass_pulse":
             p = clamp_to_range(bass.pitch - 12, 24, 48)
