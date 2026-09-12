@@ -115,6 +115,40 @@ RESPONSE_INSTRUMENTS = {
     "piano_high": 0,
 }
 
+# --------------------------------------------------------------------------
+# Nom de piste MIDI "sûr" pour l'encodage
+# --------------------------------------------------------------------------
+# mido (utilisé en interne par pretty_midi pour écrire les méta-événements,
+# dont le nom de piste) encode ces textes en Latin-1, qui ne couvre que les
+# points de code Unicode 0-255. Le "œ" français (U+0153) est hors de cette
+# plage et fait planter l'écriture du fichier MIDI (UnicodeEncodeError) —
+# et ce, même si le nom d'affichage utilisateur (fichier de sortie,
+# interface) doit lui rester inchangé, "œ" compris.
+_MIDI_NAME_REPLACEMENTS = {
+    "œ": "oe", "Œ": "OE",
+    "æ": "ae", "Æ": "AE",
+}
+
+
+def midi_safe_track_name(name: str) -> str:
+    """
+    Convertit un nom d'instrument (potentiellement hors Latin-1, ex: "Chœur")
+    en un nom de piste MIDI sûr pour mido. Ne sert QUE pour le nom interne
+    de la piste MIDI — le nom d'affichage utilisateur (fichier de sortie,
+    interface web) n'est jamais modifié par cette fonction.
+    """
+    safe = name
+    for src, dst in _MIDI_NAME_REPLACEMENTS.items():
+        safe = safe.replace(src, dst)
+    try:
+        safe.encode("latin-1")
+    except UnicodeEncodeError:
+        # Filet de sécurité pour tout autre caractère hors Latin-1 non prévu
+        # ci-dessus : on ne veut jamais planter l'écriture du MIDI pour un
+        # simple nom de piste.
+        safe = safe.encode("latin-1", errors="replace").decode("latin-1")
+    return safe
+
 
 # --------------------------------------------------------------------------
 # DÉTECTION SATB (Soprano / Alto / Tenor / Basse)
