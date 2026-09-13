@@ -25,22 +25,30 @@ Dans les deux cas, le résultat est enrichi avec :
   réel ou accord tenu), pas à intervalles mécaniques fixes.
 
 Le résultat est rendu directement en MP3 via FluidSynth + lame, et le nom
-du fichier reprend celui du MIDI importé (+ "_Orchestrated.mp3").
+du fichier reprend celui du MIDI importé, suivi du ou des instruments
+choisis par l'utilisateur (ex: "H322 Piano medium - Clarinette.mp3").
 """
 
 import io
+import logging
 import os
 import shutil
 import subprocess
 import struct
 import tempfile
+import traceback
 import unicodedata
 import wave
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import pretty_midi
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import Response
+
+logger = logging.getLogger("midi_orchestrator")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="MIDI Orchestrator")
 
@@ -71,17 +79,25 @@ INSTRUMENTS = {
     "trombone":        {"program": 57, "name": "Trombone",         "role": "bass_pad"},
     "tuba":            {"program": 58, "name": "Tuba",             "role": "bass_pad"},
     "organ":           {"program": 19, "name": "Organ",            "role": "melody"},
-    "choir":           {"program": 52, "name": "Choir",            "role": "pad_chord"},
-    "guitar":          {"program": 25, "name": "Guitar",           "role": "arpeggio"},
+    "choir":           {"program": 52, "name": "Chœur",            "role": "pad_chord"},
+    "guitar":          {"program": 25, "name": "Guitare Acoustique", "role": "arpeggio"},
+    "classical_guitar": {"program": 24, "name": "Guitare Classique", "role": "arpeggio"},
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
     "electric_guitar": {"program": 29, "name": "Electric Guitar",  "role": "arpeggio"},
     "piano_low":       {"program": 0,  "name": "Piano (grave)",    "role": "bass_pulse"},
     "piano_medium":    {"program": 0,  "name": "Piano (medium)",   "role": "harmony"},
     "piano_high":      {"program": 0,  "name": "Piano (aigu)",     "role": "melody_sparkle"},
-    "synth_warm":      {"program": 89, "name": "Synth Warm",       "role": "pad_chord"},
+    # Synthés ajoutés à la demande de l'utilisateur : aucun des 4 ne
+    # correspondait à un instrument déjà présent, les choix de programme
+    # GM et de rôle musical sont donc les miens (à ajuster si besoin).
+    # "warm"/"choir"/"halo" sont des nappes soutenues du groupe GM
+    # "Synth Pad" (89-96) : même rôle que "choir" (pad_chord). "lead" est
+    # une voix mélodique du groupe GM "Synth Lead" (81-88), destinée à
+    # porter la mélodie au premier plan comme "flute" (melody_high).
     "synth_choir":     {"program": 91, "name": "Synth Choir",      "role": "pad_chord"},
     "synth_halo":      {"program": 94, "name": "Synth Halo",       "role": "pad_chord"},
-    "synth_lead":      {"program": 80, "name": "Synth Lead",       "role": "melody"},
+    "synth_lead":      {"program": 81, "name": "Synth Lead",       "role": "melody_high"},
+    "synth_warm":      {"program": 89, "name": "Synth Warm",       "role": "pad_chord"},
 }
 
 INSTRUMENT_ALIASES = {
@@ -108,8 +124,48 @@ RESPONSE_INSTRUMENTS = {
     "clarinet": 71,
     "flute": 73,
     "guitar": 25,
+    # Mêmes caractéristiques de réponse que "guitar" (registre, nombre de
+    # notes, vélocité — voir _response_register, build_response_tracks) ;
+    # seul le programme General MIDI change (24 = guitare nylon, contre
+    # 25 = guitare acier pour "guitar"), pour le même son de corde que la
+    # piste principale "classical_guitar" dans INSTRUMENTS.
+    "classical_guitar": 24,
     "piano_high": 0,
 }
+
+# --------------------------------------------------------------------------
+# Nom de piste MIDI "sûr" pour l'encodage
+# --------------------------------------------------------------------------
+# mido (utilisé en interne par pretty_midi pour écrire les méta-événements,
+# dont le nom de piste) encode ces textes en Latin-1, qui ne couvre que les
+# points de code Unicode 0-255. Le "œ" français (U+0153) est hors de cette
+# plage et fait planter l'écriture du fichier MIDI (UnicodeEncodeError) —
+# et ce, même si le nom d'affichage utilisateur (fichier de sortie,
+# interface) doit lui rester inchangé, "œ" compris.
+_MIDI_NAME_REPLACEMENTS = {
+    "œ": "oe", "Œ": "OE",
+    "æ": "ae", "Æ": "AE",
+}
+
+
+def midi_safe_track_name(name: str) -> str:
+    """
+    Convertit un nom d'instrument (potentiellement hors Latin-1, ex: "Chœur")
+    en un nom de piste MIDI sûr pour mido. Ne sert QUE pour le nom interne
+    de la piste MIDI — le nom d'affichage utilisateur (fichier de sortie,
+    interface web) n'est jamais modifié par cette fonction.
+    """
+    safe = name
+    for src, dst in _MIDI_NAME_REPLACEMENTS.items():
+        safe = safe.replace(src, dst)
+    try:
+        safe.encode("latin-1")
+    except UnicodeEncodeError:
+        # Filet de sécurité pour tout autre caractère hors Latin-1 non prévu
+        # ci-dessus : on ne veut jamais planter l'écriture du MIDI pour un
+        # simple nom de piste.
+        safe = safe.encode("latin-1", errors="replace").decode("latin-1")
+    return safe
 
 
 # --------------------------------------------------------------------------
@@ -228,22 +284,49 @@ def clamp_to_range(pitch: int, low: int, high: int) -> int:
     return max(0, min(127, p))
 
 
+# Vélocité de la note principale de l'arpège de la guitare acoustique
+# (voir build_arpeggio_notes). Réutilisée telle quelle pour la guitare
+# basse, à la demande explicite de l'utilisateur, afin que les deux
+# guitares restent au même volume l'une par rapport à l'autre.
+GUITAR_PRINCIPAL_VELOCITY = 104
+
+
 def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, end: float, beat: float):
-    """Décompose l'accord en pattern rythmique (comping guitare) plutôt qu'un plaqué."""
+    """
+    Décompose l'accord en pattern rythmique (comping guitare) plutôt qu'un
+    plaqué.
+
+    La note principale (`base[-1]`, la plus aiguë de l'accord — c'est-à-dire
+    la voix mélodique quand les données proviennent d'un SATB) est toujours
+    placée en TÊTE du motif (index 0) et reçoit une vélocité plus marquée.
+
+    Avant ce correctif, le motif plaçait la note principale en 3e position
+    (`[basse, intérieure, MÉLODIE, intérieure]`), ce qui la rendait
+    silencieuse dès que le segment harmonique était trop court pour boucler
+    jusque-là. Sur un fichier SATB, les voix bougent indépendamment
+    (notes de passage, suspensions) : `group_notes_into_chords` crée alors
+    un nouvel accord à chaque mouvement de voix, ce qui produit de très
+    nombreux segments ne durant qu'un demi-temps — assez pour une seule
+    itération du motif. Avec l'ancien ordre, cette unique itération jouait
+    systématiquement la note la MOINS importante (la basse, garantie en
+    position 0) et sacrifiait la mélodie. En mettant la mélodie en position
+    0, elle est désormais garantie dès la première itération, quelle que
+    soit la durée du segment.
+    """
     base = [n.pitch for n in pitches]
-    pattern = [base[0]]
-    if len(base) > 1:
-        pattern.append(base[min(1, len(base) - 1)])
-    pattern.append(base[-1])
-    if len(base) > 1:
-        pattern.append(base[min(1, len(base) - 1)])
+    principal = base[-1]
+    inner = base[min(1, len(base) - 1)]
+    bass = base[0]
+    pattern = [principal, inner, bass, inner]
+    velocities = [GUITAR_PRINCIPAL_VELOCITY, 88, 88, 88]
 
     step = beat / 2
     t = start
     i = 0
     while t < end:
         note_end = min(t + step * 0.85, end)
-        track.notes.append(pretty_midi.Note(velocity=92, pitch=pattern[i % len(pattern)], start=t, end=note_end))
+        idx = i % len(pattern)
+        track.notes.append(pretty_midi.Note(velocity=velocities[idx], pitch=pattern[idx], start=t, end=note_end))
         t += step
         i += 1
 
@@ -256,10 +339,10 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     """
     spec = INSTRUMENTS[name]
     role = spec["role"]
-    track = pretty_midi.Instrument(program=spec["program"], name=spec["name"])
+    track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
     beat = 60.0 / max(tempo, 40)
 
-    for chord in chords:
+    for idx, chord in enumerate(chords):
         pitches = sorted(chord, key=lambda n: n.pitch)
         start = min(n.start for n in chord)
         end = max(n.end for n in chord)
@@ -317,14 +400,31 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
                 track.notes.append(pretty_midi.Note(velocity=85, pitch=p, start=start, end=end))
 
         elif role == "arpeggio":
-            build_arpeggio_notes(track, pitches, start, end, beat)
+            # L'arpège doit rester continu même quand le MIDI source a une
+            # pause ou un changement de phrase à cet endroit (silence entre
+            # la fin réelle de l'accord et le début du suivant) : on
+            # prolonge donc son point d'arrêt jusqu'au début de l'accord
+            # suivant plutôt que jusqu'à la fin réelle des notes en cours.
+            # Pour le tout dernier accord, il n'y a pas de "suivant" à
+            # rejoindre : on garde alors sa propre fin.
+            if idx + 1 < len(chords):
+                next_start = min(n.start for n in chords[idx + 1])
+                arp_end = max(end, next_start)
+            else:
+                arp_end = end
+            build_arpeggio_notes(track, pitches, start, arp_end, beat)
 
         elif role == "bass_pulse":
             p = clamp_to_range(bass.pitch - 12, 24, 48)
+            # La guitare basse doit sonner au même volume que la note
+            # principale de la guitare acoustique ; les autres instruments
+            # à pulsation grave (ex: piano grave) gardent leur vélocité
+            # d'origine, inchangée.
+            velocity = GUITAR_PRINCIPAL_VELOCITY if name == "bass_guitar" else 88
             t = start
             while t < end:
                 note_end = min(t + beat * 0.9, end)
-                track.notes.append(pretty_midi.Note(velocity=88, pitch=p, start=t, end=note_end))
+                track.notes.append(pretty_midi.Note(velocity=velocity, pitch=p, start=t, end=note_end))
                 t += beat
 
     return track
@@ -339,7 +439,7 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
     """
     spec = INSTRUMENTS[name]
     role = spec["role"]
-    track = pretty_midi.Instrument(program=spec["program"], name=spec["name"])
+    track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
 
     for n in sorted(voice_notes, key=lambda x: x.start):
         pitch = n.pitch
@@ -353,8 +453,20 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
         elif role in ("bass_pad", "bass_pulse"):
             pitch = clamp_to_range(pitch - 12, 24, 48)
 
+        if name == "bass_guitar":
+            # Même volume fixe que la note principale de la guitare
+            # acoustique, plutôt que la vélocité dynamique héritée de la
+            # voix de Basse d'origine — pour que les deux guitares restent
+            # équilibrées entre elles quelle que soit la dynamique du
+            # chant choral source. Les autres instruments qui doublent une
+            # voix (trompette, trombone, tuba, piano grave...) gardent leur
+            # comportement dynamique d'origine, inchangé.
+            velocity = GUITAR_PRINCIPAL_VELOCITY
+        else:
+            velocity = max(80, min(115, n.velocity or 88))
+
         track.notes.append(pretty_midi.Note(
-            velocity=max(80, min(115, n.velocity or 88)),
+            velocity=velocity,
             pitch=pitch,
             start=n.start,
             end=max(end, n.start + 0.05),
@@ -636,6 +748,7 @@ def _response_register(name: str):
         "clarinet": (55, 88),
         "flute": (67, 98),
         "guitar": (52, 84),
+        "classical_guitar": (52, 84),
         "piano_high": (72, 105),
     }.get(name, (55, 88))
 
@@ -784,7 +897,7 @@ def build_response_tracks(
                 target = candidate
                 break
 
-        count = {"clarinet": 4, "flute": 4, "guitar": 5, "piano_high": 4}.get(name, 4)
+        count = {"clarinet": 4, "flute": 4, "guitar": 5, "classical_guitar": 5, "piano_high": 4}.get(name, 4)
         if response_index % 5 == 0:
             count += 1
         count = max(3, min(6, count))
@@ -797,7 +910,7 @@ def build_response_tracks(
         if len(events) != len(arp):
             continue
 
-        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104, "piano_high": 96}.get(name, 98)
+        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104, "classical_guitar": 104, "piano_high": 96}.get(name, 98)
 
         for i, (pitch, (note_start, duration)) in enumerate(zip(arp, events)):
             frac = i / max(1, len(arp) - 1)
@@ -839,8 +952,9 @@ def _set_pan(instrument: pretty_midi.Instrument, pan_value: int):
 _PAN_BY_NAME = {
     "trumpet": 100, "flute": 30, "clarinet": 40, "clarinet_high": 20,
     "saxophone": 92, "trombone": 105, "tuba": 112, "organ": 64,
-    "choir": 64, "guitar": 25, "bass_guitar": 64, "electric_guitar": 35,
+    "choir": 64, "guitar": 25, "classical_guitar": 103, "bass_guitar": 64, "electric_guitar": 35,
     "piano_low": 64, "piano_medium": 64, "piano_high": 50,
+    "synth_choir": 78, "synth_halo": 50, "synth_lead": 88, "synth_warm": 64,
 }
 
 
@@ -971,10 +1085,87 @@ def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
         return data
 
 
-def safe_output_basename(original_filename: str) -> str:
-    base = os.path.splitext(original_filename or "orchestration")[0]
-    base = "".join(c for c in base if c.isalnum() or c in (" ", "-", "_")).strip()
-    return (base or "orchestration") + "_Orchestrated"
+# Caractères strictement interdits dans un nom de fichier (séparateurs de
+# chemin, guillemets...). On ne restreint plus aux caractères ASCII/isalnum :
+# tous les caractères Unicode (accents, œ, etc.) sont conservés tels quels.
+_FORBIDDEN_FILENAME_CHARS = set('/\\:*?"<>|')
+
+# Caractères de contrôle (CR, LF, tabulation, etc. — points de code U+0000
+# à U+001F, plus U+007F). Sans lien avec "Chœur" lui-même, mais ce filtre
+# devient nécessaire maintenant que l'en-tête Content-Disposition construit
+# ici est relayé TEL QUEL par n8n puis par le proxy PHP, sans plus jamais
+# être reconstruit en aval : un nom de fichier MIDI importé contenant un
+# retour à la ligne se propagerait alors littéralement dans l'en-tête HTTP
+# final (au mieux un rejet par le serveur ASGI, au pire un début
+# d'injection d'en-tête). On l'assainit donc ici, à la source, une bonne
+# fois pour toutes.
+_CONTROL_CHARS = {chr(c) for c in range(0x00, 0x20)} | {chr(0x7F)}
+
+
+def build_output_basename(original_filename: str, instrument_names: List[str]) -> str:
+    """
+    Construit le nom du fichier de sortie : nom du MIDI importé, suivi du
+    ou des instruments choisis par l'utilisateur dans le pré-filtrage,
+    séparés par " - " quand il y en a plusieurs.
+
+    Exemple : fichier "H322.mid" + instruments ["piano_medium", "clarinet"]
+    -> "H322 Piano (medium) - Clarinet".
+
+    Le nom garde ses caractères Unicode d'origine (accents, œ, etc.) ; il
+    est stocké et manipulé en str Python, donc nativement en UTF-8. Seul
+    l'encodage de l'en-tête HTTP Content-Disposition doit être géré à part
+    (voir `content_disposition_header`), car cet en-tête n'accepte pas
+    l'UTF-8 brut. Les caractères de contrôle (CR/LF compris) sont en
+    revanche toujours retirés ici, car eux n'ont pas leur place dans un nom
+    de fichier ni dans un en-tête HTTP, quel que soit l'encodage.
+    """
+    base = os.path.splitext(original_filename or "orchestration")[0].strip()
+    if not base:
+        base = "orchestration"
+
+    labels = [INSTRUMENTS[name]["name"] for name in instrument_names if name in INSTRUMENTS]
+    suffix = " - ".join(labels)
+
+    full = f"{base} {suffix}" if suffix else base
+    full = "".join(
+        c for c in full
+        if c not in _FORBIDDEN_FILENAME_CHARS and c not in _CONTROL_CHARS
+    ).strip()
+
+    return full or "orchestration"
+
+
+def content_disposition_header(disposition: str, filename: str) -> str:
+    """
+    Construit un en-tête Content-Disposition qui préserve correctement les
+    caractères Unicode du nom de fichier (accents, œ, etc.).
+
+    Le protocole HTTP impose que les valeurs d'en-tête soient encodables en
+    Latin-1. On ne peut donc jamais y placer le texte Unicode complet tel
+    quel (ex: "œ" provoquerait une UnicodeEncodeError à l'encodage Latin-1).
+
+    On fournit donc DEUX représentations, pour couvrir aussi bien les
+    clients stricts que les clients simplistes qui ignorent `filename*` :
+
+    - `filename="..."` : les octets UTF-8 du nom, réinterprétés un par un
+      comme des caractères Latin-1 (technique standard, utilisée par
+      Flask/Werkzeug et Django). Chaque octet UTF-8 (0-255) a un point de
+      code Latin-1 valide, donc cette conversion ne lève jamais d'erreur
+      d'encodage, et les octets qui transitent réellement sur le réseau
+      sont bien les octets UTF-8 d'origine — la plupart des navigateurs
+      et des clients HTTP décodent alors correctement le nom en UTF-8,
+      même sans connaître la RFC 5987.
+    - `filename*=UTF-8''...` (RFC 5987) : la version pourcent-encodée, pour
+      les clients strictement conformes qui privilégient ce paramètre.
+
+    `filename` est supposé déjà assaini de tout caractère de contrôle par
+    `build_output_basename` — cette fonction ne le revérifie pas.
+    """
+    utf8_bytes = filename.encode("utf-8")
+    mojibake_filename = utf8_bytes.decode("latin-1")  # 1 octet -> 1 point de code (0-255), toujours valide
+    quoted_filename = mojibake_filename.replace('"', "'")
+    encoded_utf8 = quote(filename, safe="")
+    return f'{disposition}; filename="{quoted_filename}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
 @app.post("/orchestrate")
@@ -1006,12 +1197,13 @@ async def orchestrate_endpoint(
         add_rhythm = True
 
     original_name = file.filename or "orchestration.mid"
-    out_basename = safe_output_basename(original_name)
+    out_basename = build_output_basename(original_name, instruments)
 
     raw = await file.read()
     try:
         pm = pretty_midi.PrettyMIDI(io.BytesIO(raw))
     except Exception as e:
+        logger.error("Échec de lecture du MIDI '%s': %s\n%s", original_name, e, traceback.format_exc())
         raise HTTPException(status_code=400, detail=f"Fichier MIDI invalide: {e}")
 
     try:
@@ -1033,6 +1225,10 @@ async def orchestrate_endpoint(
             keep_piano=keep_piano,
         )
     except Exception as e:
+        logger.error(
+            "Échec d'orchestration '%s' (instruments=%s, style=%s): %s\n%s",
+            original_name, instruments, style, e, traceback.format_exc(),
+        )
         raise HTTPException(status_code=500, detail=f"Erreur d'orchestration: {e}")
 
     if format == "midi":
@@ -1043,7 +1239,7 @@ async def orchestrate_endpoint(
             content=data,
             media_type="audio/midi",
             headers={
-                "Content-Disposition": f'attachment; filename="{out_basename}.mid"',
+                "Content-Disposition": content_disposition_header("attachment", f"{out_basename}.mid"),
                 "X-Detected-Tempo": f"{detected_tempo:.1f}",
             },
         )
@@ -1051,8 +1247,10 @@ async def orchestrate_endpoint(
     try:
         mp3_bytes = render_to_mp3(result)
     except subprocess.TimeoutExpired:
+        logger.error("Timeout du rendu audio pour '%s'", original_name)
         raise HTTPException(status_code=504, detail="Le rendu audio a dépassé le temps imparti.")
     except Exception as e:
+        logger.error("Échec de rendu audio pour '%s': %s\n%s", original_name, e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Erreur de rendu audio: {e}")
 
     return Response(
@@ -1060,7 +1258,7 @@ async def orchestrate_endpoint(
         media_type="audio/mpeg",
         headers={
             "Content-Length": str(len(mp3_bytes)),
-            "Content-Disposition": f'inline; filename="{out_basename}.mp3"',
+            "Content-Disposition": content_disposition_header("inline", f"{out_basename}.mp3"),
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
             "X-Detected-Tempo": f"{detected_tempo:.1f}",
