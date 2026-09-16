@@ -98,6 +98,20 @@ INSTRUMENTS = {
     "synth_halo":      {"program": 94, "name": "Synth Halo",       "role": "pad_chord"},
     "synth_lead":      {"program": 81, "name": "Synth Lead",       "role": "melody_high"},
     "synth_warm":      {"program": 89, "name": "Synth Warm",       "role": "pad_chord"},
+    # Cordes/vents/voix orchestrales classiques. Note sur "pedal_steel" :
+    # le General MIDI standard (128 programmes) n'a PAS de patch dédié à la
+    # pedal steel guitar (le groupe Guitare ne contient que nylon/steel/
+    # jazz/clean/muted/overdriven/distortion/harmonics). "Electric Guitar
+    # (clean)" est le substitut le plus proche disponible dans une
+    # SoundFont GM standard comme FluidR3_GM — le son ne sera pas
+    # identique à une vraie pedal steel (pas de glissando/bend), à ajuster
+    # si une SoundFont avec un patch plus adapté est utilisée.
+    "pedal_steel":     {"program": 26, "name": "Pedal Steel",      "role": "melody"},
+    "harp":            {"program": 46, "name": "Harp",             "role": "arpeggio"},
+    "violin":          {"program": 40, "name": "Violin",           "role": "melody"},
+    "violoncelle":     {"program": 42, "name": "Violoncelle",      "role": "harmony"},
+    "opera":           {"program": 53, "name": "Opera",            "role": "pad_chord"},
+    "harmonica":       {"program": 22, "name": "Harmonica",        "role": "melody"},
 }
 
 INSTRUMENT_ALIASES = {
@@ -955,6 +969,7 @@ _PAN_BY_NAME = {
     "choir": 64, "guitar": 25, "classical_guitar": 103, "bass_guitar": 64, "electric_guitar": 35,
     "piano_low": 64, "piano_medium": 64, "piano_high": 50,
     "synth_choir": 78, "synth_halo": 50, "synth_lead": 88, "synth_warm": 64,
+    "pedal_steel": 45, "harp": 58, "violin": 35, "violoncelle": 95, "opera": 64, "harmonica": 108,
 }
 
 
