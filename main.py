@@ -1060,6 +1060,117 @@ def orchestrate(
     return out
 
 
+# --------------------------------------------------------------------------
+# TRANSCRIPTION MP3 -> MIDI (mélodie monophonique)
+# --------------------------------------------------------------------------
+#
+# Conçu pour une entrée à une seule voix (chant fredonné, instrument
+# monophonique, ligne d'arpège) sans harmonisation. Utilise pYIN (via
+# librosa), l'algorithme de référence pour le suivi de hauteur fondamentale
+# monophonique, plutôt qu'un modèle de transcription polyphonique complet
+# (inutile et bien plus lourd pour ce cas d'usage).
+
+MIN_NOTE_DURATION = 0.08  # secondes — filtre les détections trop courtes (bruit/artefacts)
+
+
+def decode_mp3_to_wav(mp3_path: str, wav_path: str):
+    result = subprocess.run(
+        ["lame", "--decode", mp3_path, wav_path],
+        capture_output=True, timeout=90,
+    )
+    if result.returncode != 0 or not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
+        raise RuntimeError(
+            f"Échec du décodage MP3 (lame --decode). stderr: {result.stderr.decode(errors='ignore')[:500]}"
+        )
+
+
+def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
+    """
+    Détecte la mélodie monophonique d'un fichier audio et la convertit en
+    un PrettyMIDI à une seule piste (piano, une note à la fois).
+    """
+    import librosa
+    import numpy as np
+
+    y, sr = librosa.load(wav_path, sr=22050, mono=True)
+    if y.size == 0:
+        raise ValueError("Fichier audio vide ou illisible.")
+
+    hop_length = 256
+    f0, voiced_flag, voiced_prob = librosa.pyin(
+        y,
+        fmin=librosa.note_to_hz("C2"),
+        fmax=librosa.note_to_hz("C6"),
+        sr=sr,
+        hop_length=hop_length,
+        fill_na=None,
+    )
+
+    times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
+
+    # RMS par trame, pour dériver une vélocité MIDI réaliste (plus fort =
+    # note jouée avec plus d'énergie).
+    rms = librosa.feature.rms(y=y, hop_length=hop_length, frame_length=hop_length * 4)[0]
+    rms = np.interp(np.linspace(0, 1, len(times)), np.linspace(0, 1, len(rms)), rms) if len(rms) else np.zeros(len(times))
+
+    # Hz -> numéro de note MIDI arrondi au demi-ton le plus proche.
+    midi_pitches = np.full(len(f0), np.nan)
+    voiced_mask = voiced_flag & ~np.isnan(f0) & (voiced_prob > 0.5)
+    midi_pitches[voiced_mask] = np.round(librosa.hz_to_midi(f0[voiced_mask]))
+
+    # Segmente les trames consécutives de même hauteur en notes discrètes.
+    notes = []
+    current_pitch = None
+    current_start = None
+    current_rms_values = []
+
+    def flush_note(end_time):
+        nonlocal current_pitch, current_start, current_rms_values
+        if current_pitch is not None and (end_time - current_start) >= MIN_NOTE_DURATION:
+            avg_rms = float(np.mean(current_rms_values)) if current_rms_values else 0.0
+            velocity = int(np.clip(40 + avg_rms * 6000, 45, 115))
+            notes.append(pretty_midi.Note(
+                velocity=velocity,
+                pitch=int(np.clip(current_pitch, 0, 127)),
+                start=float(current_start),
+                end=float(end_time),
+            ))
+        current_pitch = None
+        current_start = None
+        current_rms_values = []
+
+    for i, t in enumerate(times):
+        pitch = midi_pitches[i]
+        if np.isnan(pitch):
+            flush_note(t)
+            continue
+        if current_pitch is None:
+            current_pitch = pitch
+            current_start = t
+            current_rms_values = [rms[i]]
+        elif pitch == current_pitch:
+            current_rms_values.append(rms[i])
+        else:
+            flush_note(t)
+            current_pitch = pitch
+            current_start = t
+            current_rms_values = [rms[i]]
+
+    flush_note(times[-1] if len(times) else 0.0)
+
+    if not notes:
+        raise ValueError(
+            "Aucune mélodie monophonique détectée dans ce fichier — vérifiez qu'il "
+            "s'agit bien d'une voix/mélodie seule, sans harmonisation ni accompagnement dense."
+        )
+
+    pm = pretty_midi.PrettyMIDI(initial_tempo=120.0)
+    melody = pretty_midi.Instrument(program=0, name="Melody")
+    melody.notes = notes
+    pm.instruments.append(melody)
+    return pm
+
+
 def render_to_mp3(pm: pretty_midi.PrettyMIDI) -> bytes:
     if not os.path.exists(SOUNDFONT_PATH):
         raise RuntimeError(f"SoundFont introuvable à {SOUNDFONT_PATH}")
@@ -1281,6 +1392,82 @@ async def orchestrate_endpoint(
     )
 
 
+@app.post("/transcribe")
+async def transcribe_endpoint(
+    file: UploadFile = File(...),
+    x_api_key: str = Header(default=""),
+    format: str = "mp3",  # "mp3" pour écouter un aperçu, "midi" pour télécharger le fichier
+):
+    """
+    Convertit un MP3 contenant une mélodie monophonique (voix fredonnée,
+    instrument seul, ligne d'arpège — sans harmonisation ni paroles denses)
+    en un fichier MIDI à une seule piste. Ce MIDI peut ensuite être réimporté
+    tel quel dans /orchestrate, exactement comme un fichier MIDI piano
+    classique (une seule piste, pas de voix SATB nommées).
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Clé API invalide")
+
+    original_name = file.filename or "melodie.mp3"
+    out_basename = build_output_basename(original_name, [])
+    out_basename = f"{out_basename} Transcription"
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Fichier audio vide.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mp3_path = os.path.join(tmp, "input.mp3")
+        wav_path = os.path.join(tmp, "input.wav")
+        with open(mp3_path, "wb") as f:
+            f.write(raw)
+
+        try:
+            decode_mp3_to_wav(mp3_path, wav_path)
+        except Exception as e:
+            logger.error("Échec du décodage MP3 '%s': %s\n%s", original_name, e, traceback.format_exc())
+            raise HTTPException(status_code=400, detail=f"Fichier MP3 invalide ou illisible: {e}")
+
+        try:
+            pm = transcribe_monophonic_melody(wav_path)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except Exception as e:
+            logger.error("Échec de la transcription '%s': %s\n%s", original_name, e, traceback.format_exc())
+            raise HTTPException(status_code=500, detail=f"Erreur de transcription: {e}")
+
+    if format == "midi":
+        buf = io.BytesIO()
+        pm.write(buf)
+        data = buf.getvalue()
+        return Response(
+            content=data,
+            media_type="audio/midi",
+            headers={
+                "Content-Disposition": content_disposition_header("attachment", f"{out_basename}.mid"),
+            },
+        )
+
+    try:
+        mp3_bytes = render_to_mp3(pm)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Le rendu audio a dépassé le temps imparti.")
+    except Exception as e:
+        logger.error("Échec du rendu de l'aperçu '%s': %s\n%s", original_name, e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erreur de rendu audio: {e}")
+
+    return Response(
+        content=mp3_bytes,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Length": str(len(mp3_bytes)),
+            "Content-Disposition": content_disposition_header("inline", f"{out_basename}_preview.mp3"),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.get("/instruments")
 async def list_instruments():
     return {
@@ -1320,6 +1507,11 @@ def _test_lame_encoding() -> dict:
 @app.get("/health")
 async def health():
     soundfont_ok = os.path.exists(SOUNDFONT_PATH)
+    try:
+        import librosa  # noqa: F401
+        librosa_ok = True
+    except Exception:
+        librosa_ok = False
     return {
         "status": "ok",
         "soundfont_found": soundfont_ok,
@@ -1327,4 +1519,5 @@ async def health():
         "fluidsynth_found": shutil.which("fluidsynth") is not None,
         "lame_found": shutil.which("lame") is not None,
         "lame_encode_test": _test_lame_encoding(),
+        "librosa_found": librosa_ok,
     }
