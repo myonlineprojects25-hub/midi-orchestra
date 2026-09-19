@@ -2,3 +2,6 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pretty_midi==0.2.10
 python-multipart==0.0.9
+librosa==0.10.2.post1
+soundfile==0.12.1
+numpy==1.26.4
