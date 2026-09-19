@@ -1,12 +1,15 @@
 FROM python:3.11-slim
 
-# fluidsynth : synthétise le MIDI en audio
-# fluid-soundfont-gm : banque de sons General MIDI (piano, orgue, trompette, clarinette...)
-# lame : encodeur MP3 dédié, plus fiable que de dépendre du build ffmpeg pour libmp3lame
+# fluidsynth       : synthétise le MIDI en audio
+# fluid-soundfont-gm : banque de sons General MIDI
+# lame             : encodeur MP3 dédié, sert aussi à décoder (MP3 -> WAV)
+#                    pour la transcription MP3->MIDI
+# libsndfile1      : dépendance native de soundfile/librosa (lecture audio)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fluidsynth \
     fluid-soundfont-gm \
     lame \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
