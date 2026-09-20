@@ -1065,10 +1065,16 @@ def orchestrate(
 # --------------------------------------------------------------------------
 #
 # Conçu pour une entrée à une seule voix (chant fredonné, instrument
-# monophonique, ligne d'arpège) sans harmonisation. Utilise pYIN (via
-# librosa), l'algorithme de référence pour le suivi de hauteur fondamentale
-# monophonique, plutôt qu'un modèle de transcription polyphonique complet
-# (inutile et bien plus lourd pour ce cas d'usage).
+# monophonique, ligne d'arpège) sans harmonisation.
+#
+# Utilise librosa.yin (YIN simple) plutôt que pyin (YIN probabiliste) :
+# pyin est plus précis mais nettement plus lent, et l'infrastructure
+# d'hébergement (reverse-proxy openresty devant WordPress) coupe les
+# requêtes trop longues avec un 504 Gateway Timeout — un temps de calcul
+# court est donc une contrainte dure, pas juste une question de confort.
+# Le voisement (silence vs note) est déterminé nous-mêmes via l'énergie
+# RMS, puisque yin (contrairement à pyin) ne fournit pas de probabilité
+# de voisement intégrée.
 
 MIN_NOTE_DURATION = 0.08  # secondes — filtre les détections trop courtes (bruit/artefacts)
 
@@ -1092,33 +1098,42 @@ def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
     import librosa
     import numpy as np
 
-    y, sr = librosa.load(wav_path, sr=22050, mono=True)
+    # 16 kHz suffit largement pour une mélodie monophonique (fmax visé =
+    # C6 ~1047 Hz) et réduit le volume de calcul par rapport à 22050 Hz.
+    y, sr = librosa.load(wav_path, sr=16000, mono=True)
     if y.size == 0:
         raise ValueError("Fichier audio vide ou illisible.")
 
-    hop_length = 256
-    f0, voiced_flag, voiced_prob = librosa.pyin(
+    # hop_length plus grand = moins de trames à analyser = beaucoup plus
+    # rapide, au prix d'une résolution temporelle un peu plus grossière
+    # (toujours largement suffisante pour des notes de mélodie).
+    hop_length = 512
+    frame_length = 2048
+
+    f0 = librosa.yin(
         y,
         fmin=librosa.note_to_hz("C2"),
         fmax=librosa.note_to_hz("C6"),
         sr=sr,
+        frame_length=frame_length,
         hop_length=hop_length,
-        fill_na=None,
     )
 
     times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
 
-    # RMS par trame, pour dériver une vélocité MIDI réaliste (plus fort =
-    # note jouée avec plus d'énergie).
-    rms = librosa.feature.rms(y=y, hop_length=hop_length, frame_length=hop_length * 4)[0]
-    rms = np.interp(np.linspace(0, 1, len(times)), np.linspace(0, 1, len(rms)), rms) if len(rms) else np.zeros(len(times))
+    rms = librosa.feature.rms(y=y, hop_length=hop_length, frame_length=frame_length)[0]
+    rms = rms[: len(times)] if len(rms) >= len(times) else np.pad(rms, (0, len(times) - len(rms)))
 
-    # Hz -> numéro de note MIDI arrondi au demi-ton le plus proche.
+    # Seuil de voisement basé sur l'énergie : une trame est considérée
+    # "jouée" si son RMS dépasse une fraction du RMS maximum du fichier.
+    max_rms = float(np.max(rms)) if rms.size else 0.0
+    voicing_threshold = max_rms * 0.08
+    voiced_mask = rms > voicing_threshold if max_rms > 0 else np.zeros(len(times), dtype=bool)
+
     midi_pitches = np.full(len(f0), np.nan)
-    voiced_mask = voiced_flag & ~np.isnan(f0) & (voiced_prob > 0.5)
-    midi_pitches[voiced_mask] = np.round(librosa.hz_to_midi(f0[voiced_mask]))
+    valid_mask = voiced_mask & ~np.isnan(f0) & (f0 > 0)
+    midi_pitches[valid_mask] = np.round(librosa.hz_to_midi(f0[valid_mask]))
 
-    # Segmente les trames consécutives de même hauteur en notes discrètes.
     notes = []
     current_pitch = None
     current_start = None
