@@ -52,6 +52,30 @@ if not logger.handlers:
 
 app = FastAPI(title="MIDI Orchestrator")
 
+
+@app.on_event("startup")
+async def warm_up_librosa():
+    """
+    librosa.yin s'appuie sur numba, qui compile son code au tout premier
+    appel (JIT). Sans ce réchauffement, ce coût de compilation serait payé
+    par le tout premier utilisateur réel — potentiellement suffisant à lui
+    seul pour dépasser le timeout de la passerelle devant l'hébergement.
+    On l'exécute donc une fois ici, sur un signal factice minuscule,
+    pendant le démarrage du conteneur plutôt que pendant une requête.
+    """
+    try:
+        import time
+        import numpy as np
+        import librosa
+
+        t0 = time.monotonic()
+        dummy = np.random.randn(16000).astype(np.float32)  # 1 seconde de bruit à 16kHz
+        librosa.yin(dummy, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C6"), sr=16000, hop_length=512)
+        librosa.feature.rms(y=dummy, hop_length=512)
+        logger.info("Réchauffement librosa/numba terminé en %.1fs", time.monotonic() - t0)
+    except Exception as e:
+        logger.warning("Échec du réchauffement librosa (non bloquant): %s", e)
+
 API_KEY = os.environ.get("ORCHESTRATOR_API_KEY", "change-moi")
 SOUNDFONT_PATH = os.environ.get("SOUNDFONT_PATH", "/usr/share/sounds/sf2/FluidR3_GM.sf2")
 
