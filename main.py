@@ -1118,77 +1118,45 @@ def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
     """
     Détecte la mélodie monophonique d'un fichier audio et la convertit en
     un PrettyMIDI à une seule piste (piano, une note à la fois).
-
-    Amélioration ciblée : fidélité des hauteurs de notes.
     """
     import librosa
     import numpy as np
 
-    # Résolution fréquentielle supérieure pour une meilleure estimation du pitch.
-    y, sr = librosa.load(wav_path, sr=22050, mono=True)
+    # 16 kHz suffit largement pour une mélodie monophonique (fmax visé =
+    # C6 ~1047 Hz) et réduit le volume de calcul par rapport à 22050 Hz.
+    y, sr = librosa.load(wav_path, sr=16000, mono=True)
     if y.size == 0:
         raise ValueError("Fichier audio vide ou illisible.")
 
-    hop_length = 256
-    frame_length = 4096
+    # hop_length plus grand = moins de trames à analyser = beaucoup plus
+    # rapide, au prix d'une résolution temporelle un peu plus grossière
+    # (toujours largement suffisante pour des notes de mélodie).
+    hop_length = 512
+    frame_length = 2048
 
-    # pYIN fournit une estimation de hauteur probabiliste plus robuste
-    # que YIN simple, notamment face aux harmoniques et aux fluctuations.
-    f0, voiced_flag, voiced_prob = librosa.pyin(
+    f0 = librosa.yin(
         y,
         fmin=librosa.note_to_hz("C2"),
         fmax=librosa.note_to_hz("C6"),
         sr=sr,
         frame_length=frame_length,
         hop_length=hop_length,
-        fill_na=np.nan,
     )
 
     times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
 
-    rms = librosa.feature.rms(
-        y=y,
-        hop_length=hop_length,
-        frame_length=frame_length,
-    )[0]
-    rms = rms[:len(times)] if len(rms) >= len(times) else np.pad(
-        rms, (0, len(times) - len(rms))
-    )
+    rms = librosa.feature.rms(y=y, hop_length=hop_length, frame_length=frame_length)[0]
+    rms = rms[: len(times)] if len(rms) >= len(times) else np.pad(rms, (0, len(times) - len(rms)))
 
+    # Seuil de voisement basé sur l'énergie : une trame est considérée
+    # "jouée" si son RMS dépasse une fraction du RMS maximum du fichier.
     max_rms = float(np.max(rms)) if rms.size else 0.0
     voicing_threshold = max_rms * 0.08
+    voiced_mask = rms > voicing_threshold if max_rms > 0 else np.zeros(len(times), dtype=bool)
 
-    # On exige simultanément une énergie suffisante et une confiance
-    # de voisement raisonnable afin d'éviter les fausses notes.
-    voiced_mask = (
-        ~np.isnan(f0)
-        & (f0 > 0)
-        & (rms > voicing_threshold)
-        & (voiced_prob >= 0.70)
-        & voiced_flag
-    )
-
-    midi_float = np.full(len(f0), np.nan, dtype=float)
-    midi_float[voiced_mask] = librosa.hz_to_midi(f0[voiced_mask])
-
-    # Lissage léger de la hauteur pour supprimer les fluctuations isolées
-    # sans déplacer volontairement la note musicale.
-    valid_indices = np.flatnonzero(~np.isnan(midi_float))
-    if len(valid_indices) >= 3:
-        smoothed = midi_float.copy()
-        for pos in range(1, len(valid_indices) - 1):
-            i = valid_indices[pos]
-            a = midi_float[valid_indices[pos - 1]]
-            b = midi_float[i]
-            c = midi_float[valid_indices[pos + 1]]
-            if abs(b - a) > 1.5 and abs(b - c) > 1.5:
-                smoothed[i] = a if abs(a - c) < 0.5 else b
-        midi_float = smoothed
-
-    # Conversion finale au demi-ton MIDI seulement après stabilisation.
     midi_pitches = np.full(len(f0), np.nan)
-    valid_mask = ~np.isnan(midi_float)
-    midi_pitches[valid_mask] = np.round(midi_float[valid_mask])
+    valid_mask = voiced_mask & ~np.isnan(f0) & (f0 > 0)
+    midi_pitches[valid_mask] = np.round(librosa.hz_to_midi(f0[valid_mask]))
 
     notes = []
     current_pitch = None
