@@ -359,10 +359,36 @@ def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, e
     velocities = [GUITAR_PRINCIPAL_VELOCITY, 88, 88, 88]
 
     step = beat / 2
+
+    # Durée minimale pour qu'une note du motif reste musicalement utile.
+    # En dessous, on la considère comme un simple reliquat de découpage
+    # plutôt qu'une vraie note voulue.
+    #
+    # Pourquoi c'est nécessaire : la boucle ci-dessous avance par pas fixes
+    # de `step` et clippe la dernière itération à `end`, quel que soit le
+    # temps qu'il reste. Au milieu d'un morceau, cette dernière note
+    # tronquée est inaudible car la note "principal" du segment suivant
+    # démarre juste après, à l'instant précis où `end` (= `arp_end`) a été
+    # prolongé pour rejoindre ce segment suivant. Mais en fin de phrase
+    # réelle (silence avant la phrase suivante) ou en toute fin de morceau
+    # (aucun segment suivant, voir l'appelant), rien ne masque plus cette
+    # note tronquée : elle ressort comme une petite défaillance audible
+    # (note quasi-nulle ou coupée trop court). On la saute donc simplement
+    # plutôt que de la jouer clippée.
+    MIN_ARPEGGIO_NOTE_DURATION = step * 0.25
+
     t = start
     i = 0
     while t < end:
         note_end = min(t + step * 0.85, end)
+        # La toute première note (i == 0, la mélodie/note principale) doit
+        # TOUJOURS jouer, même sur un segment très court — c'est la
+        # garantie décrite plus haut. Le garde-fou anti-troncature ne
+        # s'applique donc qu'aux notes suivantes du motif (i >= 1), là où
+        # sauter une note trop courte ne coûte qu'un battement de comping
+        # de moindre importance plutôt que la mélodie.
+        if i > 0 and note_end - t < MIN_ARPEGGIO_NOTE_DURATION:
+            break
         idx = i % len(pattern)
         track.notes.append(pretty_midi.Note(velocity=velocities[idx], pitch=pattern[idx], start=t, end=note_end))
         t += step
