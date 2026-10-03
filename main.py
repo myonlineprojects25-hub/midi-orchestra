@@ -1140,25 +1140,51 @@ def decode_mp3_to_wav(mp3_path: str, wav_path: str):
         )
 
 
+def _sliding_nanmedian(values, half_window: int):
+    """Médiane glissante tolérante aux NaN (fenêtre de 2*half_window+1 trames)."""
+    import numpy as np
+    n = len(values)
+    out = np.full(n, np.nan)
+    for i in range(n):
+        w = values[max(0, i - half_window): i + half_window + 1]
+        w = w[~np.isnan(w)]
+        if w.size:
+            out[i] = np.median(w)
+    return out
+
+
 def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
     """
-    Détecte la mélodie monophonique d'un fichier audio et la convertit en
-    un PrettyMIDI à une seule piste (piano, une note à la fois).
+    Transcrit la mélodie principale d'un fichier audio en UNE SEULE suite de
+    notes (monophonique, jamais deux notes simultanées), jouée au piano.
+
+    Priorités : fidélité des hauteurs d'abord, puis du rythme.
+      1. Détection de f0 par YIN (rapide, compatible timeout passerelle).
+      2. Correction d'accordage global : si l'enregistrement est désaccordé
+         (ex. +30 cents), on recale avant d'arrondir, sinon chaque note
+         risque de tomber sur le mauvais demi-ton.
+      3. Correction des erreurs d'octave de YIN (sauts de +/-12 demi-tons
+         isolés) par comparaison à la médiane locale.
+      4. Lissage médian, puis segmentation avec hystérésis : une note ne
+         change que si la hauteur s'écarte nettement (vibrato, glissandi
+         légers et gigue ne créent plus de fausses notes).
+      5. Nettoyage : notes trop courtes supprimées, trous minuscules entre
+         deux mêmes hauteurs recollés, chevauchements interdits.
     """
     import librosa
     import numpy as np
 
-    # 16 kHz suffit largement pour une mélodie monophonique (fmax visé =
-    # C6 ~1047 Hz) et réduit le volume de calcul par rapport à 22050 Hz.
     y, sr = librosa.load(wav_path, sr=16000, mono=True)
     if y.size == 0:
         raise ValueError("Fichier audio vide ou illisible.")
 
-    # hop_length plus grand = moins de trames à analyser = beaucoup plus
-    # rapide, au prix d'une résolution temporelle un peu plus grossière
-    # (toujours largement suffisante pour des notes de mélodie).
-    hop_length = 512
-    frame_length = 2048
+    # Normalisation du niveau pour que les seuils d'énergie soient stables.
+    peak = float(np.max(np.abs(y)))
+    if peak > 0:
+        y = y / peak
+
+    hop_length = 256          # ~16 ms : meilleure résolution temporelle
+    frame_length = 2048       # ~128 ms : reste fiable jusqu'à C2
 
     f0 = librosa.yin(
         y,
@@ -1168,60 +1194,112 @@ def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
         frame_length=frame_length,
         hop_length=hop_length,
     )
-
     times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
+    frame_dt = hop_length / sr
 
     rms = librosa.feature.rms(y=y, hop_length=hop_length, frame_length=frame_length)[0]
     rms = rms[: len(times)] if len(rms) >= len(times) else np.pad(rms, (0, len(times) - len(rms)))
 
-    # Seuil de voisement basé sur l'énergie : une trame est considérée
-    # "jouée" si son RMS dépasse une fraction du RMS maximum du fichier.
-    max_rms = float(np.max(rms)) if rms.size else 0.0
-    voicing_threshold = max_rms * 0.08
-    voiced_mask = rms > voicing_threshold if max_rms > 0 else np.zeros(len(times), dtype=bool)
+    # --- Voisement : seuil relatif au niveau typique (95e centile) plutôt
+    # qu'au pic absolu, pour qu'un seul transitoire fort ne rende pas muettes
+    # les notes douces.
+    ref_rms = float(np.percentile(rms, 95)) if rms.size else 0.0
+    if ref_rms <= 0:
+        raise ValueError("Aucune mélodie monophonique détectée dans ce fichier.")
+    voiced = rms > ref_rms * 0.10
 
-    midi_pitches = np.full(len(f0), np.nan)
-    valid_mask = voiced_mask & ~np.isnan(f0) & (f0 > 0)
-    midi_pitches[valid_mask] = np.round(librosa.hz_to_midi(f0[valid_mask]))
+    midi_f = np.full(len(f0), np.nan)
+    ok = voiced & np.isfinite(f0) & (f0 > 0)
+    midi_f[ok] = librosa.hz_to_midi(f0[ok])
+
+    if not np.any(ok):
+        raise ValueError(
+            "Aucune mélodie monophonique détectée dans ce fichier — vérifiez qu'il "
+            "s'agit bien d'une voix/mélodie seule, sans harmonisation ni accompagnement dense."
+        )
+
+    # --- Correction d'accordage global (moyenne circulaire des écarts au
+    # demi-ton le plus proche, pondérée par l'énergie).
+    valid = ~np.isnan(midi_f)
+    devs = midi_f[valid] - np.round(midi_f[valid])
+    w = rms[valid]
+    ang = 2 * np.pi * devs
+    offset = np.arctan2(np.sum(w * np.sin(ang)), np.sum(w * np.cos(ang))) / (2 * np.pi)
+    midi_f -= float(np.clip(offset, -0.5, 0.5))
+
+    # --- Correction des erreurs d'octave (sauts YIN isolés).
+    local_med = _sliding_nanmedian(midi_f, 6)
+    for i in np.where(~np.isnan(midi_f))[0]:
+        if not np.isnan(local_med[i]):
+            diff = local_med[i] - midi_f[i]
+            if abs(diff) > 9:
+                midi_f[i] += 12 * round(diff / 12)
+
+    # --- Lissage médian (supprime la gigue image par image).
+    midi_f = _sliding_nanmedian(np.where(np.isnan(midi_f), np.nan, midi_f), 2)
+    midi_f[~voiced] = np.nan
+
+    # --- Segmentation avec hystérésis.
+    HYST = 0.65  # demi-tons d'écart requis pour changer de note
+    notes_raw = []  # (start_idx, end_idx_exclusive, pitch, rms_mean)
+    cur_pitch = None
+    cur_start = 0
+    cur_rms = []
+
+    def close(end_idx):
+        nonlocal cur_pitch, cur_rms
+        if cur_pitch is not None:
+            notes_raw.append((cur_start, end_idx, cur_pitch, float(np.mean(cur_rms))))
+        cur_pitch = None
+        cur_rms = []
+
+    for i, p in enumerate(midi_f):
+        if np.isnan(p):
+            close(i)
+            continue
+        if cur_pitch is None:
+            cur_pitch, cur_start, cur_rms = int(round(p)), i, [rms[i]]
+        elif abs(p - cur_pitch) < HYST:
+            cur_rms.append(rms[i])
+        else:
+            close(i)
+            cur_pitch, cur_start, cur_rms = int(round(p)), i, [rms[i]]
+    close(len(midi_f))
+
+    # --- Nettoyage : durée minimale, recollage des micro-trous, monophonie.
+    min_frames = max(1, int(round(MIN_NOTE_DURATION / frame_dt)))
+    notes_raw = [n for n in notes_raw if (n[1] - n[0]) >= min_frames]
+
+    merged = []
+    for s, e, p, r in notes_raw:
+        if merged:
+            ps, pe, pp, pr = merged[-1]
+            if pp == p and (s - pe) * frame_dt <= 0.04:
+                merged[-1] = (ps, e, pp, (pr + r) / 2)
+                continue
+        merged.append((s, e, p, r))
+
+    if not merged:
+        raise ValueError(
+            "Aucune mélodie monophonique détectée dans ce fichier — vérifiez qu'il "
+            "s'agit bien d'une voix/mélodie seule, sans harmonisation ni accompagnement dense."
+        )
 
     notes = []
-    current_pitch = None
-    current_start = None
-    current_rms_values = []
-
-    def flush_note(end_time):
-        nonlocal current_pitch, current_start, current_rms_values
-        if current_pitch is not None and (end_time - current_start) >= MIN_NOTE_DURATION:
-            avg_rms = float(np.mean(current_rms_values)) if current_rms_values else 0.0
-            velocity = int(np.clip(40 + avg_rms * 6000, 45, 115))
-            notes.append(pretty_midi.Note(
-                velocity=velocity,
-                pitch=int(np.clip(current_pitch, 0, 127)),
-                start=float(current_start),
-                end=float(end_time),
-            ))
-        current_pitch = None
-        current_start = None
-        current_rms_values = []
-
-    for i, t in enumerate(times):
-        pitch = midi_pitches[i]
-        if np.isnan(pitch):
-            flush_note(t)
+    for idx, (s, e, p, r) in enumerate(merged):
+        start = float(times[s])
+        end = float(times[e - 1] + frame_dt)
+        if idx + 1 < len(merged):
+            end = min(end, float(times[merged[idx + 1][0]]))  # jamais de chevauchement
+        if end - start < 0.03:
             continue
-        if current_pitch is None:
-            current_pitch = pitch
-            current_start = t
-            current_rms_values = [rms[i]]
-        elif pitch == current_pitch:
-            current_rms_values.append(rms[i])
-        else:
-            flush_note(t)
-            current_pitch = pitch
-            current_start = t
-            current_rms_values = [rms[i]]
-
-    flush_note(times[-1] if len(times) else 0.0)
+        velocity = int(np.clip(45 + (r / ref_rms) * 55, 50, 120))
+        notes.append(pretty_midi.Note(
+            velocity=velocity,
+            pitch=int(np.clip(p, 21, 108)),
+            start=start,
+            end=end,
+        ))
 
     if not notes:
         raise ValueError(
@@ -1230,7 +1308,7 @@ def transcribe_monophonic_melody(wav_path: str) -> pretty_midi.PrettyMIDI:
         )
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=120.0)
-    melody = pretty_midi.Instrument(program=0, name="Melody")
+    melody = pretty_midi.Instrument(program=0, name="Melody")  # piano acoustique
     melody.notes = notes
     pm.instruments.append(melody)
     return pm
