@@ -103,7 +103,7 @@ INSTRUMENTS = {
     "trombone":        {"program": 57, "name": "Trombone",         "role": "bass_pad"},
     "tuba":            {"program": 58, "name": "Tuba",             "role": "bass_pad"},
     "organ":           {"program": 19, "name": "Organ",            "role": "melody"},
-    "choir":           {"program": 52, "name": "Chœur",            "role": "pad_chord"},
+    "choir":           {"program": 52, "name": "Chorale",          "role": "pad_chord"},
     "guitar":          {"program": 25, "name": "Guitare Acoustique", "role": "arpeggio"},
     "classical_guitar": {"program": 24, "name": "Guitare Classique", "role": "arpeggio"},
     "bass_guitar":     {"program": 32, "name": "Bass Guitar",      "role": "bass_pulse"},
@@ -136,6 +136,26 @@ INSTRUMENTS = {
     "violoncelle":     {"program": 42, "name": "Violoncelle",      "role": "harmony"},
     "opera":           {"program": 53, "name": "Opera",            "role": "pad_chord"},
     "harmonica":       {"program": 22, "name": "Harmonica",        "role": "melody"},
+    # Instruments MÉLODIQUES SOLO : ils ne jouent QUE la ligne mélodique
+    # (voix de Soprano réelle quand le fichier est SATB, note la plus aiguë
+    # de chaque accord sinon) — jamais l'accord complet. Chacun est transposé
+    # et contraint dans le registre confortable de son instrument (voir
+    # SOLO_SETTINGS). Mêmes programmes GM que leurs homonymes "harmoniques".
+    "flute_solo":         {"program": 73, "name": "Flûte traversière solo", "role": "solo_melody"},
+    "clarinet_solo":      {"program": 71, "name": "Clarinette solo",        "role": "solo_melody"},
+    "clarinet_high_solo": {"program": 71, "name": "Clarinette aiguë solo",  "role": "solo_melody"},
+    "saxophone_solo":     {"program": 65, "name": "Saxophone solo",         "role": "solo_melody"},
+    "trombone_solo":      {"program": 57, "name": "Trombone solo",          "role": "solo_melody"},
+}
+
+# Réglages des instruments solo : décalage d'octave appliqué à la mélodie
+# (en demi-tons), registre jouable (bas, haut) et vélocité de base.
+SOLO_SETTINGS = {
+    "flute_solo":         {"shift": 12,  "range": (72, 96), "velocity": 96},
+    "clarinet_solo":      {"shift": 0,   "range": (55, 88), "velocity": 96},
+    "clarinet_high_solo": {"shift": 12,  "range": (72, 96), "velocity": 94},
+    "saxophone_solo":     {"shift": 0,   "range": (55, 88), "velocity": 98},
+    "trombone_solo":      {"shift": -12, "range": (40, 72), "velocity": 96},
 }
 
 INSTRUMENT_ALIASES = {
@@ -154,6 +174,7 @@ INSTRUMENT_ALIASES = {
 VOICE_FOR_ROLE = {
     "bass_pad": "bass",
     "bass_pulse": "bass",
+    "solo_melody": "soprano",
 }
 
 STYLES = {"pop", "ballad", "latin", "waltz", "classic", "gospel", "rnb", "blues"}
@@ -188,7 +209,7 @@ _MIDI_NAME_REPLACEMENTS = {
 
 def midi_safe_track_name(name: str) -> str:
     """
-    Convertit un nom d'instrument (potentiellement hors Latin-1, ex: "Chœur")
+    Convertit un nom d'instrument (potentiellement hors Latin-1, ex: "Chœur" ou "Cœur")
     en un nom de piste MIDI sûr pour mido. Ne sert QUE pour le nom interne
     de la piste MIDI — le nom d'affichage utilisateur (fichier de sortie,
     interface web) n'est jamais modifié par cette fonction.
@@ -425,7 +446,18 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
                 seen_pitches.add(n.pitch)
                 distinct_pitches.append(n)
 
-        if role == "melody":
+        if role == "solo_melody":
+            # Ligne mélodique seule : uniquement la note la plus aiguë de
+            # l'accord, jouée dans le registre propre à l'instrument.
+            cfg = SOLO_SETTINGS[name]
+            low, high = cfg["range"]
+            p = clamp_to_range(melody.pitch + cfg["shift"], low, high)
+            note_end = max(melody.end - 0.03, melody.start + 0.1)
+            track.notes.append(pretty_midi.Note(
+                velocity=cfg["velocity"], pitch=p, start=melody.start, end=note_end
+            ))
+
+        elif role == "melody":
             for n in distinct_pitches:
                 track.notes.append(pretty_midi.Note(
                     velocity=95, pitch=n.pitch, start=start, end=max(start + 0.3, end - 0.05)
@@ -508,6 +540,17 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
     for n in sorted(voice_notes, key=lambda x: x.start):
         pitch = n.pitch
         end = n.end
+
+        if role == "solo_melody":
+            cfg = SOLO_SETTINGS[name]
+            low, high = cfg["range"]
+            pitch = clamp_to_range(pitch + cfg["shift"], low, high)
+            end = max(end - 0.03, n.start + 0.1)
+            velocity = max(cfg["velocity"] - 10, min(cfg["velocity"] + 15, n.velocity or cfg["velocity"]))
+            track.notes.append(pretty_midi.Note(
+                velocity=velocity, pitch=pitch, start=n.start, end=end,
+            ))
+            continue
 
         if role in ("melody_high", "harmony_high"):
             pitch = clamp_to_range(pitch + 12, 72, 96)
@@ -1019,6 +1062,8 @@ _PAN_BY_NAME = {
     "choir": 64, "guitar": 25, "classical_guitar": 103, "bass_guitar": 64, "electric_guitar": 35,
     "piano_low": 64, "piano_medium": 64, "piano_high": 50,
     "synth_choir": 78, "synth_halo": 50, "synth_lead": 88, "synth_warm": 64,
+    "flute_solo": 30, "clarinet_solo": 40, "clarinet_high_solo": 20,
+    "saxophone_solo": 92, "trombone_solo": 105,
     "pedal_steel": 45, "harp": 58, "violin": 35, "violoncelle": 95, "opera": 64, "harmonica": 108,
 }
 
