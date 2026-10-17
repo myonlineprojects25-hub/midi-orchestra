@@ -16,21 +16,26 @@ Deux types de fichiers d'entrée sont supportés :
 
 Dans les deux cas, le résultat est enrichi avec :
 - un style rythmique (pop, ballade, latin, valse, classic, gospel, rnb, blues),
+  appliqué à la batterie ET à la basse, sur la vraie grille de temps du
+  morceau (voir resolve_pulse) — uniquement quand "Rythme" est activé,
 - des roulements de batterie en fin de phrase (caisse claire, toms,
   crescendo, double roulement), combinables,
 - des notes d'ornement (passages/échappées),
-- des réponses instrumentales : de courts arpèges qui suivent la gamme
-  diatonique du morceau (tonalité estimée via Krumhansl-Schmuckler),
-  placés uniquement aux vraies frontières de phrase détectées (silence
-  réel ou accord tenu), pas à intervalles mécaniques fixes.
+- des réponses instrumentales : de courtes lignes de croches calées sur la
+  grille de temps, qui suivent la gamme du morceau (tonalité estimée via
+  Krumhansl-Schmuckler), restent dans l'accord sur les temps et rejoignent
+  la phrase suivante ; posées uniquement dans un silence ou sur une note
+  tenue en fin de phrase (jamais par-dessus une mélodie qui avance).
 
 Le résultat est rendu directement en MP3 via FluidSynth + lame, et le nom
 du fichier reprend celui du MIDI importé, suivi du ou des instruments
 choisis par l'utilisateur (ex: "H322 Piano medium - Clarinette.mp3").
 """
 
+import bisect
 import io
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -39,6 +44,7 @@ import tempfile
 import traceback
 import unicodedata
 import wave
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -90,6 +96,10 @@ DRUM_CRASH = 49
 DRUM_TOM_LOW = 45
 DRUM_TOM_MID = 47
 DRUM_TOM_HIGH = 50
+DRUM_SIDE_STICK = 37
+DRUM_CLAP = 39
+DRUM_RIDE = 51
+DRUM_TAMBOURINE = 54
 
 # --------------------------------------------------------------------------
 # Registre des instruments disponibles : programme General MIDI + rôle musical
@@ -145,6 +155,13 @@ INSTRUMENTS = {
     "clarinet_solo":      {"program": 71, "name": "Clarinette solo",        "role": "solo_melody"},
     "clarinet_high_solo": {"program": 71, "name": "Clarinette aiguë solo",  "role": "solo_melody"},
     "saxophone_solo":     {"program": 65, "name": "Saxophone solo",         "role": "solo_melody"},
+    # Saxophone à sourdine : le General MIDI n'a PAS de patch de saxophone
+    # avec sourdine. On part du sax alto (65) et on reproduit l'effet de
+    # sourdine par le jeu : vélocité basse (la SoundFont assombrit alors le
+    # timbre via son modulateur vélocité -> filtre), volume de canal relevé
+    # (CC7) pour que la note reste audible malgré cette vélocité basse, et
+    # réverbération/chorus réduits (CC91/CC93) pour un son sec et resserré.
+    "saxophone_muted_solo": {"program": 65, "name": "Saxophone à sourdine solo", "role": "solo_melody"},
     "trombone_solo":      {"program": 57, "name": "Trombone solo",          "role": "solo_melody"},
 }
 
@@ -155,6 +172,8 @@ SOLO_SETTINGS = {
     "clarinet_solo":      {"shift": 0,   "range": (55, 88), "velocity": 96},
     "clarinet_high_solo": {"shift": 12,  "range": (72, 96), "velocity": 94},
     "saxophone_solo":     {"shift": 0,   "range": (55, 88), "velocity": 98},
+    "saxophone_muted_solo": {"shift": 0, "range": (55, 88), "velocity": 70,
+                             "cc": {7: 115, 91: 20, 93: 0}, "fixed_velocity": True},
     "trombone_solo":      {"shift": -12, "range": (40, 72), "velocity": 96},
 }
 
@@ -416,6 +435,15 @@ def build_arpeggio_notes(track: pretty_midi.Instrument, pitches, start: float, e
         i += 1
 
 
+def _apply_solo_controllers(track: pretty_midi.Instrument, name: str):
+    """Pose en début de piste les contrôleurs MIDI propres à un solo (ex: sourdine)."""
+    cfg = SOLO_SETTINGS.get(name, {})
+    for number, value in cfg.get("cc", {}).items():
+        track.control_changes.append(
+            pretty_midi.ControlChange(number=number, value=max(0, min(127, value)), time=0.0)
+        )
+
+
 def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     """
     Construit la piste d'un instrument en dérivant mélodie/harmonie/basse
@@ -426,6 +454,7 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
     role = spec["role"]
     track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
     beat = 60.0 / max(tempo, 40)
+    _apply_solo_controllers(track, name)
 
     for idx, chord in enumerate(chords):
         pitches = sorted(chord, key=lambda n: n.pitch)
@@ -536,6 +565,7 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
     spec = INSTRUMENTS[name]
     role = spec["role"]
     track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
+    _apply_solo_controllers(track, name)
 
     for n in sorted(voice_notes, key=lambda x: x.start):
         pitch = n.pitch
@@ -546,7 +576,12 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
             low, high = cfg["range"]
             pitch = clamp_to_range(pitch + cfg["shift"], low, high)
             end = max(end - 0.03, n.start + 0.1)
-            velocity = max(cfg["velocity"] - 10, min(cfg["velocity"] + 15, n.velocity or cfg["velocity"]))
+            if cfg.get("fixed_velocity"):
+                # Sourdine : vélocité fixe, pour garder un timbre constant
+                # quelle que soit la dynamique de la voix de Soprano source.
+                velocity = cfg["velocity"]
+            else:
+                velocity = max(cfg["velocity"] - 10, min(cfg["velocity"] + 15, n.velocity or cfg["velocity"]))
             track.notes.append(pretty_midi.Note(
                 velocity=velocity, pitch=pitch, start=n.start, end=end,
             ))
@@ -619,115 +654,334 @@ def build_fill(roll_type: str, drums: pretty_midi.Instrument, t: float, beat: fl
             drums.notes.append(pretty_midi.Note(velocity=vel, pitch=DRUM_SNARE, start=st, end=st + step * 0.8))
 
 
-def add_style_beat(drums: pretty_midi.Instrument, t: float, beat: float, beat_i: int, style: str):
-    if style == "ballad":
-        if beat_i == 0:
-            drums.notes.append(pretty_midi.Note(velocity=90, pitch=DRUM_KICK, start=t, end=t + 0.1))
-        if beat_i == 2:
-            drums.notes.append(pretty_midi.Note(velocity=85, pitch=DRUM_SNARE, start=t, end=t + 0.1))
-        drums.notes.append(pretty_midi.Note(velocity=45, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.8))
+# --------------------------------------------------------------------------
+# PULSATION : tempo réel, grille de temps et position des temps forts
+#
+# Batterie, basse et réponses instrumentales s'appuient toutes sur CETTE
+# grille (et non plus sur un simple "écart médian entre accords"), pour que
+# leurs notes tombent sur les vrais temps du morceau.
+# --------------------------------------------------------------------------
+
+@dataclass
+class Pulse:
+    tempo: float   # battements par minute
+    beat: float    # durée d'un temps, en secondes
+    phi: float     # instant du temps k = 0, en secondes
+    p: int         # les temps k tels que k ≡ p (mod bpb) sont des temps 1
+    bpb: int       # temps par mesure
+
+    def time(self, k: int) -> float:
+        return self.phi + k * self.beat
+
+    def beat_index(self, k: int) -> int:
+        return (k - self.p) % self.bpb
+
+    def bar(self, k: int) -> int:
+        return (k - self.p) // self.bpb
+
+    def nearest_beat(self, t: float) -> Tuple[int, float]:
+        x = (t - self.phi) / self.beat
+        k = int(round(x))
+        return k, abs(x - k) * self.beat
+
+    def on_beat(self, t: float, tol: float = 0.06) -> bool:
+        return self.nearest_beat(t)[1] <= tol
+
+    def is_downbeat(self, t: float, tol: float = 0.06) -> bool:
+        k, dist = self.nearest_beat(t)
+        return dist <= tol and self.beat_index(k) == 0
+
+
+class _NoteIndex:
+    """Retrouve rapidement les notes qui sonnent à un instant donné."""
+
+    def __init__(self, notes):
+        self.notes = sorted(notes, key=lambda n: n.start)
+        self.starts = [n.start for n in self.notes]
+
+    def sounding(self, t: float, lead: float = 0.03):
+        i = bisect.bisect_right(self.starts, t + lead)
+        return [n for n in self.notes[:i] if n.end > t + 0.02]
+
+
+def _grid_alignment(onsets: List[float], bpm: float) -> Tuple[float, float]:
+    """Meilleur (score, phase) d'alignement des attaques sur une grille au tempo `bpm`."""
+    beat = 60.0 / bpm
+    tol = max(0.03, min(0.07, beat * 0.1))
+    best_score, best_phi = -1.0, 0.0
+    for ph in sorted({round(o % beat, 3) for o in onsets[:16]}):
+        s = 0.0
+        for o in onsets:
+            x = (o - ph) / beat
+            if abs(x - round(x)) * beat <= tol:
+                s += 1.0                                   # sur le temps
+            elif abs(x * 2 - round(x * 2)) * beat / 2 <= tol:
+                s += 0.8                                   # sur la croche
+            elif abs(x * 4 - round(x * 4)) * beat / 4 <= tol:
+                s += 0.4                                   # sur la double-croche
+        s /= len(onsets)
+        if s > best_score + 1e-9:
+            best_score, best_phi = s, ph
+    return best_score, best_phi
+
+
+def _pick_downbeat(chords, beat: float, phi: float, bpb: int) -> int:
+    """
+    Choisit lequel des `bpb` temps est le temps 1. Indice principal : l'harmonie
+    change surtout au début des mesures (changement de note de basse sur un
+    temps fort). Par défaut, le tout premier accord est un temps 1 (pas
+    d'anacrouse), sauf indice net du contraire.
+    """
+    tol = max(0.03, min(0.07, beat * 0.1))
+    weights = [1.0, 0.4, 0.4] if bpb == 3 else [1.0, 0.3, 0.7, 0.3]
+    scores = [0.0] * bpb
+    prev_bass = None
+    first_k = None
+    for c in chords:
+        onset = min(n.start for n in c)
+        bass_pc = min(c, key=lambda n: n.pitch).pitch % 12
+        changed = prev_bass is None or bass_pc != prev_bass
+        prev_bass = bass_pc
+        x = (onset - phi) / beat
+        k = int(round(x))
+        if abs(x - k) * beat > tol:
+            continue
+        if first_k is None:
+            first_k = k
+        w = 1.0 if changed else 0.15
+        for p in range(bpb):
+            scores[p] += w * weights[(k - p) % bpb]
+    if first_k is None:
+        return 0
+    scores[first_k % bpb] *= 1.25
+    return max(range(bpb), key=lambda p: scores[p])
+
+
+def resolve_pulse(pm: pretty_midi.PrettyMIDI, chords, bpb: int = 4) -> Pulse:
+    """
+    Détermine le tempo de pulsation, la phase de la grille et le temps 1.
+    Le tempo inscrit dans le fichier MIDI est préféré quand les attaques
+    s'alignent bien dessus ; sinon on retombe sur l'estimation par accords
+    (et ses multiples/sous-multiples).
+    """
+    onsets = sorted({round(min(n.start for n in c), 4) for c in chords})
+    est = estimate_tempo_from_chords(chords)
+
+    if len(onsets) < 3:
+        return Pulse(est, 60.0 / est, 0.0, 0, bpb)
+
+    file_tempo = None
+    try:
+        _, tempi = pm.get_tempo_changes()
+        if len(tempi):
+            file_tempo = float(tempi[0])
+    except Exception:
+        file_tempo = None
+
+    bases = [b for b in (file_tempo, est) if b and b > 0]
+    candidates: List[float] = []
+    for mult in (1.0, 2.0, 0.5):
+        for b in bases:
+            v = b * mult
+            if 50.0 <= v <= 200.0 and not any(abs(v - c) < 0.5 for c in candidates):
+                candidates.append(v)
+    if not candidates:
+        candidates = [est]
+
+    results = [(bpm,) + _grid_alignment(onsets, bpm) for bpm in candidates]
+    best = max(r[1] for r in results)
+    bpm, _, phi = next(r for r in results if r[1] >= 0.85 * best)
+
+    beat = 60.0 / bpm
+    return Pulse(bpm, beat, phi, _pick_downbeat(chords, beat, phi, bpb), bpb)
+
+
+# --------------------------------------------------------------------------
+# Motifs par style. Chaque motif décrit, pour un temps donné de la mesure,
+# les frappes (décalage en temps, note, vélocité, durée en temps).
+# --------------------------------------------------------------------------
+
+def _drum_events(style: str, idx: int):
+    K, S, HC = DRUM_KICK, DRUM_SNARE, DRUM_HIHAT_CLOSED
+    ev = []
+
+    if style == "waltz":
+        if idx == 0:
+            ev.append((0, K, 100, 0.25))
+        else:
+            ev.append((0, HC, 65, 0.6))
+
+    elif style == "ballad":
+        if idx == 0:
+            ev.append((0, K, 90, 0.25))
+        if idx == 2:
+            ev.append((0, S, 85, 0.25))
+        ev.append((0, HC, 45, 0.8))
 
     elif style == "latin":
-        if beat_i == 0:
-            drums.notes.append(pretty_midi.Note(velocity=100, pitch=DRUM_KICK, start=t, end=t + 0.1))
-        if beat_i == 1:
-            drums.notes.append(pretty_midi.Note(velocity=90, pitch=DRUM_KICK, start=t + beat / 2, end=t + beat / 2 + 0.1))
-        if beat_i in (1, 3):
-            drums.notes.append(pretty_midi.Note(velocity=85, pitch=DRUM_SNARE, start=t, end=t + 0.1))
-        drums.notes.append(pretty_midi.Note(velocity=65, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.4))
-        drums.notes.append(pretty_midi.Note(velocity=55, pitch=DRUM_HIHAT_CLOSED, start=t + beat / 2, end=t + beat * 0.9))
+        if idx == 0:
+            ev.append((0, K, 100, 0.25))
+        if idx == 1:
+            ev.append((0.5, K, 90, 0.25))
+        if idx in (1, 3):
+            ev.append((0, S, 85, 0.25))
+        ev += [(0, HC, 65, 0.4), (0.5, HC, 55, 0.4)]
 
-    elif style == "waltz":
-        if beat_i == 0:
-            drums.notes.append(pretty_midi.Note(velocity=100, pitch=DRUM_KICK, start=t, end=t + 0.1))
-        else:
-            drums.notes.append(pretty_midi.Note(velocity=65, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.6))
+    elif style == "classic":
+        # Sobre : pas de caisse claire, grosse caisse douce sur le temps 1,
+        # ride très légère sur chaque temps.
+        if idx == 0:
+            ev.append((0, K, 70, 0.25))
+        ev.append((0, DRUM_RIDE, 38, 0.9))
 
-    else:  # "pop", "classic", "gospel", "rnb", "blues"
-        if beat_i in (0, 2):
-            drums.notes.append(pretty_midi.Note(velocity=105, pitch=DRUM_KICK, start=t, end=t + 0.1))
-        if beat_i in (1, 3):
-            drums.notes.append(pretty_midi.Note(velocity=100, pitch=DRUM_SNARE, start=t, end=t + 0.1))
-        drums.notes.append(pretty_midi.Note(velocity=70, pitch=DRUM_HIHAT_CLOSED, start=t, end=t + beat * 0.4))
-        drums.notes.append(pretty_midi.Note(velocity=55, pitch=DRUM_HIHAT_CLOSED, start=t + beat / 2, end=t + beat * 0.9))
+    elif style == "gospel":
+        # Contretemps marqués : caisse claire + battements de mains sur 2 et 4,
+        # tambourin en croches.
+        if idx in (0, 2):
+            ev.append((0, K, 100, 0.25))
+        if idx == 2:
+            ev.append((0.5, K, 80, 0.25))
+        if idx in (1, 3):
+            ev += [(0, S, 95, 0.25), (0, DRUM_CLAP, 90, 0.25)]
+        ev += [(0, DRUM_TAMBOURINE, 75, 0.3), (0.5, DRUM_TAMBOURINE, 55, 0.3)]
+
+    elif style == "rnb":
+        # Grosse caisse syncopée, charleston en doubles-croches.
+        if idx == 0:
+            ev.append((0, K, 100, 0.25))
+        if idx == 1:
+            ev += [(0, S, 92, 0.25), (0.5, K, 82, 0.25)]
+        if idx == 2:
+            ev.append((0.5, K, 90, 0.25))
+        if idx == 3:
+            ev.append((0, S, 92, 0.25))
+        ev += [(0, HC, 70, 0.2), (0.25, HC, 35, 0.2), (0.5, HC, 55, 0.2), (0.75, HC, 35, 0.2)]
+
+    elif style == "blues":
+        # Shuffle ternaire : ride sur le temps et sur le dernier tiers du temps.
+        if idx in (0, 2):
+            ev.append((0, K, 100, 0.25))
+        if idx in (1, 3):
+            ev.append((0, S, 95, 0.25))
+        ev += [(0, DRUM_RIDE, 80, 0.5), (2.0 / 3.0, DRUM_RIDE, 55, 0.3)]
+
+    else:  # "pop"
+        if idx in (0, 2):
+            ev.append((0, K, 105, 0.25))
+        if idx in (1, 3):
+            ev.append((0, S, 100, 0.25))
+        ev += [(0, HC, 70, 0.4), (0.5, HC, 55, 0.4)]
+
+    return ev
 
 
-def build_drum_track(total_duration: float, tempo_bpm: float, style: str, rolls: List[str]) -> pretty_midi.Instrument:
+def build_drum_track(total_duration: float, pulse: Pulse, style: str, rolls: List[str]) -> pretty_midi.Instrument:
     drums = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
-    beat = 60.0 / max(tempo_bpm, 40)
-    beats_per_bar = 3 if style == "waltz" else 4
-
-    t = 0.0
-    bar_i = 0
-    beat_i = 0
+    rolls = rolls or ["snare"]
     roll_index = 0
-    while t < total_duration:
-        is_phrase_end = (bar_i % 2 == 1) and (beat_i == beats_per_bar - 1)
+
+    k = 0
+    while True:
+        t = pulse.time(k)
+        if t >= total_duration:
+            break
+
+        idx = pulse.beat_index(k)
+        bar = pulse.bar(k)
+        is_phrase_end = bar >= 0 and bar % 2 == 1 and idx == pulse.bpb - 1
+
         if is_phrase_end:
-            chosen = rolls[roll_index % len(rolls)]
-            build_fill(chosen, drums, t, beat)
+            build_fill(rolls[roll_index % len(rolls)], drums, t, pulse.beat)
             roll_index += 1
         else:
-            add_style_beat(drums, t, beat, beat_i, style)
-
-        t += beat
-        beat_i += 1
-        if beat_i >= beats_per_bar:
-            beat_i = 0
-            bar_i += 1
+            for off, pitch, vel, length in _drum_events(style, idx):
+                st = t + off * pulse.beat
+                drums.notes.append(pretty_midi.Note(
+                    velocity=vel, pitch=pitch, start=st, end=st + max(0.06, length * pulse.beat),
+                ))
+        k += 1
 
     return drums
 
 
-def build_bass_track(chords, tempo_bpm: float, style: str = "pop") -> pretty_midi.Instrument:
+def _bass_events(style: str, idx: int):
+    """(décalage en temps, degré, durée en temps ou 'bar', vélocité)."""
+    if style == "waltz":
+        return [(0, "R" if idx == 0 else "5", 0.9, 85)]
+    if style == "ballad":
+        return [(0, "R", 1.9, 75)] if idx in (0, 2) else []
+    if style == "latin":
+        return [(0, "R", 0.42, 85), (0.5, "5", 0.42, 85)]
+    if style == "classic":
+        return [(0, "R", "bar", 72)] if idx == 0 else []
+    if style == "gospel":
+        return {0: [(0, "R", 1.0, 95)], 1: [(0.5, "R", 0.45, 78)],
+                2: [(0, "5", 1.0, 88)], 3: [(0, "T", 0.9, 80)]}.get(idx, [])
+    if style == "rnb":
+        return {0: [(0, "R", 0.9, 95)], 1: [(0.5, "R", 0.4, 78)],
+                2: [(0, "5", 0.9, 88)], 3: [(0.5, "R", 0.4, 80)]}.get(idx, [])
+    if style == "blues":
+        # Basse "qui marche" : fondamentale, tierce, quinte, sixte.
+        return [(0, {0: "R", 1: "T", 2: "5", 3: "6"}.get(idx, "R"), 0.95, 88)]
+    return [(0, "R", 0.9, 90)]  # pop
+
+
+def build_bass_track(chords, pulse: Pulse, style: str = "pop") -> pretty_midi.Instrument:
     bass = pretty_midi.Instrument(program=33, name="Bass")
-    beat = 60.0 / max(tempo_bpm, 40)
+    all_notes = [n for c in chords for n in c]
+    if not all_notes:
+        return bass
 
-    for chord in chords:
-        pitches = sorted(chord, key=lambda n: n.pitch)
-        root = max(pitches[0].pitch - 12, 0)
-        fifth = min(root + 7, 127)
-        start = min(n.start for n in chord)
-        end = max(n.end for n in chord)
+    index = _NoteIndex(all_notes)
+    end_total = max(n.end for n in all_notes)
 
-        if style == "waltz":
-            t = start
-            i = 0
-            while t < end:
-                pitch = root if i % 3 == 0 else fifth
-                note_end = min(t + beat * 0.9, end)
-                bass.notes.append(pretty_midi.Note(velocity=85, pitch=pitch, start=t, end=note_end))
-                t += beat
-                i += 1
+    k = 0
+    while True:
+        t0 = pulse.time(k)
+        if t0 >= end_total:
+            break
 
-        elif style == "ballad":
-            t = start
-            while t < end:
-                note_end = min(t + beat * 2 * 0.95, end)
-                bass.notes.append(pretty_midi.Note(velocity=75, pitch=root, start=t, end=note_end))
-                t += beat * 2
+        idx = pulse.beat_index(k)
+        for off, degree, length, vel in _bass_events(style, idx):
+            t = t0 + off * pulse.beat
+            sounding = index.sounding(t)
+            if not sounding:
+                continue
 
-        elif style == "latin":
-            t = start
-            i = 0
-            while t < end:
-                pitch = root if i % 2 == 0 else fifth
-                note_end = min(t + beat / 2 * 0.85, end)
-                bass.notes.append(pretty_midi.Note(velocity=85, pitch=pitch, start=t, end=note_end))
-                t += beat / 2
-                i += 1
+            lowest = min(sounding, key=lambda n: n.pitch).pitch
+            root = lowest - 12
+            while root < 28:
+                root += 12
+            while root > 55:
+                root -= 12
 
-        else:
-            t = start
-            while t < end:
-                note_end = min(t + beat * 0.9, end)
-                bass.notes.append(pretty_midi.Note(velocity=90, pitch=root, start=t, end=note_end))
-                t += beat
+            pcs = {n.pitch % 12 for n in sounding}
+            if degree == "R":
+                pitch = root
+            elif degree == "5":
+                pitch = root + 7
+            elif degree == "6":
+                pitch = root + 9
+            else:  # "T" : tierce mineure si l'accord la contient, majeure sinon
+                pitch = root + (3 if (lowest + 3) % 12 in pcs else 4)
+
+            chord_end = max(n.end for n in sounding)
+            span = pulse.beat * pulse.bpb * 0.98 if length == "bar" else length * pulse.beat
+            end = min(t + span, chord_end)
+            if end - t < 0.05:
+                continue
+
+            bass.notes.append(pretty_midi.Note(velocity=vel, pitch=min(pitch, 127), start=t, end=end))
+        k += 1
 
     return bass
 
 
-def build_ornament_track(melody_notes: List[pretty_midi.Note], skip_indices=frozenset()) -> pretty_midi.Instrument:
+def build_ornament_track(
+    melody_notes: List[pretty_midi.Note],
+    skip_indices=frozenset(),
+    skip_windows=(),
+) -> pretty_midi.Instrument:
     """
     Notes de passage / d'échappée entre les notes mélodiques.
     `skip_indices` évite de placer un ornement là où une réponse
@@ -745,6 +999,8 @@ def build_ornament_track(melody_notes: List[pretty_midi.Note], skip_indices=froz
             gap = max(n2.start - n1.end, 0)
             dur = min(0.15, gap / 2) if gap else 0.10
             start = max(n1.end, n2.start - 0.15)
+            if any(w0 <= start <= w1 for (w0, w1) in skip_windows):
+                continue
             ornaments.notes.append(pretty_midi.Note(
                 velocity=55, pitch=pitch, start=start, end=start + dur
             ))
@@ -797,50 +1053,40 @@ def _nearest_index(pitches: List[int], value: int) -> int:
 # DÉTECTION DE VRAIES FRONTIÈRES DE PHRASE
 # --------------------------------------------------------------------------
 
-def detect_phrase_boundaries(chords) -> List[int]:
+def detect_phrase_boundaries(line, pulse: Pulse) -> List[int]:
     """
-    Une frontière de phrase est un endroit musicalement réel où placer une
-    réponse : un vrai silence avant l'accord suivant, ou un accord
-    d'ARRIVÉE nettement plus tenu que la normale locale (cadence). Repli
-    sur un calage toutes les 4 accords seulement si le morceau n'a aucun
-    de ces indices (legato très régulier sans aucune respiration).
+    Renvoie les indices `i` de la ligne mélodique après lesquels une phrase se
+    termine réellement, c'est-à-dire là où la mélodie laisse de la place :
+
+    - un vrai silence (au moins un demi-temps) avant la note suivante ; ou
+    - une note nettement tenue (au moins 1,75 temps ET plus longue que la
+      normale du morceau) dont la fin tombe sur un début de mesure.
+
+    Deux frontières retenues sont séparées d'au moins 6 temps. Si le morceau
+    n'offre aucun de ces espaces (mélodie legato sans respiration), il n'y a
+    PAS de frontière : mieux vaut aucune réponse qu'une réponse posée par-dessus
+    la mélodie.
     """
-    if len(chords) < 3:
+    if len(line) < 3:
         return []
 
-    harmonic_durations = []
-    for i, c in enumerate(chords):
-        start = min(n.start for n in c)
-        if i + 1 < len(chords):
-            next_start = min(n.start for n in chords[i + 1])
-        else:
-            next_start = max(n.end for n in c)
-        harmonic_durations.append(max(next_start - start, 0.01))
+    beat = pulse.beat
+    iois = sorted(max(line[i + 1].start - line[i].start, 0.01) for i in range(len(line) - 1))
+    median = iois[len(iois) // 2]
 
-    sorted_durs = sorted(harmonic_durations)
-    median_dur = sorted_durs[len(sorted_durs) // 2]
+    boundaries: List[int] = []
+    last_start = -1e9
+    for i in range(len(line) - 1):
+        cur, nxt = line[i], line[i + 1]
+        gap = nxt.start - cur.end
+        ioi = nxt.start - cur.start
 
-    boundaries = []
-    n = len(chords)
-    for i in range(n - 1):
-        end_ = max(x.end for x in chords[i])
-        next_start = min(x.start for x in chords[i + 1])
-        gap = next_start - end_
-        # Cas normal : l'accord de DÉPART (i) est tenu plus longtemps que la
-        # normale (allongement agogique classique en fin de phrase interne).
-        held_departure = harmonic_durations[i] > median_dur * 1.6
-        # Cas particulier : seule la toute dernière transition doit aussi
-        # vérifier l'accord d'ARRIVÉE, pour capter un accord final sustenu
-        # qui n'a lui-même pas de transition sortante à mesurer.
-        held_final_arrival = (i == n - 2) and (harmonic_durations[i + 1] > median_dur * 1.6)
-        if gap > 0.12 or held_departure or held_final_arrival:
+        is_rest = gap >= 0.5 * beat
+        is_held = ioi >= max(1.75 * beat, 1.6 * median) and pulse.is_downbeat(nxt.start)
+
+        if (is_rest or is_held) and cur.start - last_start >= 6 * beat:
             boundaries.append(i)
-
-    # Repli uniquement si AUCUNE frontière réelle n'a été trouvée (silence
-    # ou accord tenu) — un cantique bien composé a naturellement peu de
-    # phrases (3-6 sur un morceau court), ce n'est pas un signe d'échec.
-    if not boundaries:
-        boundaries = list(range(3, len(chords) - 1, 4))
+            last_start = cur.start
 
     return boundaries
 
@@ -860,99 +1106,59 @@ def _response_register(name: str):
     }.get(name, (55, 88))
 
 
-def _unique_pcs(chord):
-    return list(dict.fromkeys(int(n.pitch) % 12 for n in chord))
-
-
-def _nearest_pitch(pc: int, reference: int, low: int, high: int) -> int:
-    candidates = [
-        pc + 12 * octave
-        for octave in range(-1, 11)
-        if low <= pc + 12 * octave <= high
-    ]
-    return min(candidates, key=lambda p: abs(p - reference)) if candidates else clamp_to_range(reference, low, high)
-
-
-def _make_diatonic_response(
-    scale_pitches: List[int],
-    start_pitch: int,
-    target_pitch: int,
-    count: int,
-) -> List[int]:
+def _line_indices(i_start: int, i_end: int, count: int, n_scale: int) -> List[int]:
     """
-    Construit une ligne de 'count' notes qui se déplace PAR DEGRÉS DE LA
-    GAMME entre start_pitch et target_pitch (inclus en dernier) — une
-    vraie conduite des voix diatonique.
+    Indices de gamme d'une ligne de `count` notes qui ARRIVE sur `i_end` en
+    avançant par degrés conjoints (ou par petits sauts si la distance est grande).
     """
-    if not scale_pitches or count < 1:
-        return []
-
-    i0 = _nearest_index(scale_pitches, start_pitch)
-    i1 = _nearest_index(scale_pitches, target_pitch)
-
-    if i0 == i1:
-        i1 = i0 + 1 if i0 + 1 < len(scale_pitches) else max(0, i0 - 1)
-
-    step = 1 if i1 > i0 else -1
-    indices = list(range(i0, i1 + step, step))
-
-    if len(indices) > count:
-        chosen = [indices[0]]
-        inner = indices[1:-1]
-        if inner and count > 2:
-            pick_step = max(1, len(inner) // max(1, count - 2))
-            chosen += inner[::pick_step][: count - 2]
-        chosen.append(indices[-1])
-        indices = chosen[:count]
-
-    elif len(indices) < count:
-        extra_needed = count - len(indices)
-        prefix = []
-        cur = i0
-        direction = -step
-        for _ in range(extra_needed):
-            cur = max(0, min(len(scale_pitches) - 1, cur + direction))
-            prefix.append(cur)
-        indices = list(reversed(prefix)) + indices
-
-    return [scale_pitches[i] for i in indices[:count]]
+    d = abs(i_end - i_start)
+    direction = 1 if i_end >= i_start else -1
+    if d >= count - 1:
+        raw = [round(i_start + direction * d * j / (count - 1)) for j in range(count)]
+    else:
+        raw = [i_end - direction * (count - 1 - j) for j in range(count)]
+    return [max(0, min(n_scale - 1, i)) for i in raw]
 
 
-def _response_events(start: float, end: float, count: int, beat: float, name: str):
-    available = end - start
-    if available <= 0 or count < 1:
-        return []
-
-    usable = min(available * 0.92, beat * 2.25)
-    usable = max(usable, min(available, beat * 0.5))
-    step = usable / count
-
-    gate = 0.84 if name in ("clarinet", "flute") else 0.68
-
-    return [
-        (start + i * step, max(0.06, step * gate))
-        for i in range(count)
-    ]
+def _snap_to_chord(pitch: int, pcs, low: int, high: int, avoid=()) -> int:
+    """Note de l'accord la plus proche de `pitch`, en évitant les répétitions (`avoid`)."""
+    candidates = [p for p in range(low, high + 1) if p % 12 in pcs]
+    if not candidates:
+        return pitch
+    # On évite la répétition seulement si une autre note de l'accord est proche
+    # (≤ 5 demi-tons) ; sinon on préfère répéter plutôt que de faire un grand saut.
+    preferred = [p for p in candidates if p not in avoid and abs(p - pitch) <= 5]
+    pool = preferred or candidates
+    return min(pool, key=lambda p: abs(p - pitch))
 
 
 def build_response_tracks(
-    melody_notes: List[pretty_midi.Note],
-    chords,
-    tempo_bpm: float,
+    line,
+    all_notes,
+    pulse: Pulse,
     responses: List[str],
     tonic_pc: int,
     mode: str,
-) -> Tuple[dict, set]:
-    reserved_indices = set()
+) -> Tuple[dict, list]:
+    """
+    Réponses instrumentales : courtes lignes de croches, calées sur la grille
+    des temps, posées UNIQUEMENT là où la mélodie laisse de la place.
 
-    if not responses or not melody_notes or len(chords) < 3:
-        return {}, reserved_indices
+    - Dans un silence : la réponse démarre sur la première croche qui suit la
+      fin de la phrase et finit avant l'entrée suivante.
+    - Sur une note tenue : elle occupe la fin de la tenue, calée sur l'attaque
+      suivante ; ses notes tombant sur un temps appartiennent à l'accord qui
+      sonne, les autres sont des notes de passage de la gamme.
+    - Dans tous les cas la ligne avance par degrés et ARRIVE à une note voisine
+      de la première note de la phrase suivante, pour s'enchaîner avec elle.
+    """
+    reserved: list = []
+    if not responses or len(line) < 3:
+        return {}, reserved
 
-    boundaries = detect_phrase_boundaries(chords)
+    boundaries = detect_phrase_boundaries(line, pulse)
     if not boundaries:
-        return {}, reserved_indices
-
-    beat = 60.0 / max(tempo_bpm, 40)
+        return {}, reserved
 
     tracks = {
         name: pretty_midi.Instrument(
@@ -963,26 +1169,32 @@ def build_response_tracks(
         if name in RESPONSE_INSTRUMENTS
     }
     if not tracks:
-        return {}, reserved_indices
+        return {}, reserved
 
+    beat = pulse.beat
+    half = beat / 2.0
+    index = _NoteIndex(all_notes)
     response_index = 0
 
-    for boundary in boundaries:
-        if boundary + 1 >= len(chords) or boundary >= len(melody_notes):
-            continue
+    for i in boundaries:
+        cur, nxt = line[i], line[i + 1]
+        gap = nxt.start - cur.end
 
-        reserved_indices.add(boundary)
-
-        current_chord = chords[boundary]
-        next_chord = chords[boundary + 1]
-        last_melody = melody_notes[boundary]
-        next_phrase_start = min(n.start for n in next_chord)
-
-        end = next_phrase_start - min(0.03, beat * 0.03)
-        window_len = max(beat * 0.9, min(beat * 2.25, end - last_melody.start))
-        start = max(last_melody.start, end - window_len)
-
-        if end - start < beat * 0.5:
+        # Croches d'abord ; doubles-croches si l'espace est trop court pour
+        # y loger au moins trois croches.
+        start, count, unit = 0.0, 0, half
+        for unit in (half, beat / 4.0):
+            if gap >= 0.5 * beat:
+                k = math.ceil((cur.end - pulse.phi) / unit - 1e-6)
+                start = pulse.phi + k * unit
+                count = min(4, int(((nxt.start - 0.1 * beat) - start) / unit + 1e-6))
+            else:
+                held = nxt.start - cur.start
+                count = min(4, int((held - 0.5 * beat) / unit + 1e-6))
+                start = nxt.start - count * unit
+            if count >= 3:
+                break
+        if count < 3:
             continue
 
         name = responses[response_index % len(responses)]
@@ -991,47 +1203,53 @@ def build_response_tracks(
             continue
 
         low, high = _response_register(name)
-        scale_pitches = _scale_pitches(tonic_pc, mode, low, high)
-        if not scale_pitches:
+        scale = _scale_pitches(tonic_pc, mode, low, high)
+        if len(scale) < 4:
             continue
 
-        next_pcs = _unique_pcs(next_chord) or _unique_pcs(current_chord)
-        target = _nearest_pitch(next_pcs[0], last_melody.pitch, low, high)
-        diatonic_set = set(_diatonic_degrees(tonic_pc, mode))
-        for pc in next_pcs:
-            candidate = _nearest_pitch(pc, last_melody.pitch, low, high)
-            if candidate % 12 in diatonic_set:
-                target = candidate
-                break
+        i_cur = _nearest_index(scale, cur.pitch)
+        i_nxt = _nearest_index(scale, nxt.pitch)
+        # On arrive à côté de la note suivante, du côté d'où l'on vient.
+        i_end = i_nxt + (1 if i_cur > i_nxt else -1)
+        i_end = max(0, min(len(scale) - 1, i_end))
+        pitches = [scale[j] for j in _line_indices(i_cur, i_end, count, len(scale))]
 
-        count = {"clarinet": 4, "flute": 4, "guitar": 5, "classical_guitar": 5, "piano_high": 4}.get(name, 4)
-        if response_index % 5 == 0:
-            count += 1
-        count = max(3, min(6, count))
+        harmony_at_end = {n.pitch % 12 for n in index.sounding(cur.start + 0.05)}
+        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104,
+                         "classical_guitar": 104, "piano_high": 96}.get(name, 98)
+        gate = 0.84 if name in ("clarinet", "flute") else 0.68
+        limit = nxt.start - 0.03
 
-        arp = _make_diatonic_response(scale_pitches, last_melody.pitch, target, count)
-        if len(arp) < 3:
-            continue
+        prev_pitch = None
+        for j, pitch in enumerate(pitches):
+            t = start + j * unit
+            # Les notes sur un temps (sauf la note d'arrivée) restent dans l'accord,
+            # sans répéter la note précédente ni doubler la note d'arrivée.
+            if j < count - 1 and pulse.on_beat(t, tol=0.05):
+                pcs = {n.pitch % 12 for n in index.sounding(t)} or harmony_at_end
+                if pcs:
+                    avoid = {prev_pitch}
+                    if j == count - 2:
+                        avoid.add(pitches[-1])
+                    pitch = _snap_to_chord(pitch, pcs, low, high, avoid)
+            prev_pitch = pitch
 
-        events = _response_events(start, end, len(arp), beat, name)
-        if len(events) != len(arp):
-            continue
+            end = min(t + unit * gate, limit)
+            if end - t < 0.05:
+                continue
 
-        base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104, "classical_guitar": 104, "piano_high": 96}.get(name, 98)
-
-        for i, (pitch, (note_start, duration)) in enumerate(zip(arp, events)):
-            frac = i / max(1, len(arp) - 1)
+            frac = j / max(1, count - 1)
             velocity = int(base_velocity + frac * 10)
-            tracks[name].notes.append(
-                pretty_midi.Note(
-                    velocity=min(127, max(80, velocity)),
-                    pitch=clamp_to_range(pitch, low, high),
-                    start=note_start,
-                    end=min(note_start + duration, end),
-                )
-            )
+            tracks[name].notes.append(pretty_midi.Note(
+                velocity=min(127, max(80, velocity)),
+                pitch=clamp_to_range(pitch, low, high),
+                start=t,
+                end=end,
+            ))
 
-    return tracks, reserved_indices
+        reserved.append((start - 0.05, start + count * unit))
+
+    return {k: v for k, v in tracks.items() if v.notes}, reserved
 
 
 # --------------------------------------------------------------------------
@@ -1063,7 +1281,7 @@ _PAN_BY_NAME = {
     "piano_low": 64, "piano_medium": 64, "piano_high": 50,
     "synth_choir": 78, "synth_halo": 50, "synth_lead": 88, "synth_warm": 64,
     "flute_solo": 30, "clarinet_solo": 40, "clarinet_high_solo": 20,
-    "saxophone_solo": 92, "trombone_solo": 105,
+    "saxophone_solo": 92, "saxophone_muted_solo": 84, "trombone_solo": 105,
     "pedal_steel": 45, "harp": 58, "violin": 35, "violoncelle": 95, "opera": 64, "harmonica": 108,
 }
 
@@ -1096,6 +1314,9 @@ def orchestrate(
 
     tempo = estimate_tempo_from_chords(chords)
     total_duration = max(n.end for chord in chords for n in chord)
+    # Grille de temps réelle du morceau, partagée par la batterie, la basse
+    # et les réponses instrumentales.
+    pulse = resolve_pulse(pm, chords, 3 if style == "waltz" else 4)
 
     all_tracks = {}
     for name in instruments:
@@ -1107,20 +1328,29 @@ def orchestrate(
             all_tracks[name] = build_solo_track(name, chords, tempo)
 
     if add_rhythm:
-        all_tracks["__bass"] = build_bass_track(chords, tempo, style)
-        all_tracks["__drums"] = build_drum_track(total_duration, tempo, style, rolls)
+        all_tracks["__bass"] = build_bass_track(chords, pulse, style)
+        all_tracks["__drums"] = build_drum_track(total_duration, pulse, style, rolls)
 
     melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
 
-    reserved_indices = set()
+    reserved_windows: list = []
     if responses:
         tonic_pc, mode = estimate_key(combined_notes)
-        response_tracks, reserved_indices = build_response_tracks(melody_notes, chords, tempo, responses, tonic_pc, mode)
+        # Avec un fichier à voix nommées, la ligne mélodique à suivre est la
+        # vraie voix de Soprano (et non le "plus haut son de chaque accord",
+        # faussé dès que les voix n'ont pas le même rythme).
+        if satb and satb.get("soprano"):
+            line = sorted(satb["soprano"], key=lambda n: n.start)
+        else:
+            line = melody_notes
+        response_tracks, reserved_windows = build_response_tracks(
+            line, combined_notes, pulse, responses, tonic_pc, mode
+        )
         for name, track in response_tracks.items():
             all_tracks[f"__response_{name}"] = track
 
     if add_ornaments:
-        all_tracks["__ornaments"] = build_ornament_track(melody_notes, skip_indices=reserved_indices)
+        all_tracks["__ornaments"] = build_ornament_track(melody_notes, skip_windows=reserved_windows)
 
     # Panoramique déterministe par instrument ajouté, pour rester distinct
     # de la piste originale même quand les hauteurs se recoupent.
