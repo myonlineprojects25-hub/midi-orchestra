@@ -875,10 +875,61 @@ def _drum_events(style: str, idx: int):
     return ev
 
 
-def build_drum_track(total_duration: float, pulse: Pulse, style: str, rolls: List[str]) -> pretty_midi.Instrument:
+def phrase_end_bars(line, pulse: Pulse) -> set:
+    """Numéros des mesures qui CLÔTURENT une phrase (dernière mesure avant la phrase suivante)."""
+    bars = set()
+    for i in detect_phrase_boundaries(line, pulse):
+        x = (line[i].end - 0.05 - pulse.phi) / pulse.beat
+        bars.add(pulse.bar(math.floor(x + 1e-6)))
+    return bars
+
+
+def _snare_phrase_end_events(roll_type: str, idx: int, bpb: int):
+    """
+    Mesure de fin de phrase pour les roulements "caisse claire" et "double" :
+    les TEMPS FORTS (1 et 3 en 4/4, 1 en 3/4) reçoivent un coup de caisse claire
+    accentué ; tous les autres coups tombent sur les TEMPS FAIBLES, plus
+    légers, le dernier temps montant en roulement vers le temps fort suivant.
+    """
+    S = DRUM_SNARE
+    strong = (0,) if bpb == 3 else (0, 2)
+
+    if idx in strong:
+        return [(0, S, 112 if idx == 0 else 105, 0.25)]
+
+    if idx == bpb - 1:  # dernier temps (faible) : le roulement monte
+        if roll_type == "double":
+            return [(j / 8.0, S, min(127, 55 + j * 6), 0.1) for j in range(8)]
+        return [(j / 4.0, S, 60 + j * 8, 0.12) for j in range(4)]
+
+    if roll_type == "double":
+        return [(j / 4.0, S, 52, 0.1) for j in range(4)]
+    return [(0, S, 58, 0.2), (0.5, S, 52, 0.2)]
+
+
+def build_drum_track(
+    total_duration: float,
+    pulse: Pulse,
+    style: str,
+    rolls: List[str],
+    fill_bars: Optional[set] = None,
+) -> pretty_midi.Instrument:
+    """
+    `fill_bars` : mesures de fin de phrase réellement détectées dans la mélodie.
+    À défaut (mélodie sans respiration), repli sur une mesure sur deux.
+    """
     drums = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
     rolls = rolls or ["snare"]
+    explicit = bool(fill_bars)
     roll_index = 0
+    chosen_by_bar: Dict[int, str] = {}
+
+    def put(t, events):
+        for off, pitch, vel, length in events:
+            st = t + off * pulse.beat
+            drums.notes.append(pretty_midi.Note(
+                velocity=min(127, vel), pitch=pitch, start=st, end=st + max(0.06, length * pulse.beat),
+            ))
 
     k = 0
     while True:
@@ -888,17 +939,27 @@ def build_drum_track(total_duration: float, pulse: Pulse, style: str, rolls: Lis
 
         idx = pulse.beat_index(k)
         bar = pulse.bar(k)
-        is_phrase_end = bar >= 0 and bar % 2 == 1 and idx == pulse.bpb - 1
+        in_fill = (bar in fill_bars) if explicit else (bar >= 0 and bar % 2 == 1)
 
-        if is_phrase_end:
-            build_fill(rolls[roll_index % len(rolls)], drums, t, pulse.beat)
+        if in_fill and bar not in chosen_by_bar:
+            chosen_by_bar[bar] = rolls[roll_index % len(rolls)]
             roll_index += 1
+
+        roll = chosen_by_bar.get(bar) if in_fill else None
+        base = _drum_events(style, idx)
+
+        if roll in ("snare", "double"):
+            keep = [e for e in base if e[1] not in (DRUM_SNARE, DRUM_CLAP)]
+            put(t, keep + _snare_phrase_end_events(roll, idx, pulse.bpb))
+        elif roll in ("toms", "crescendo") and idx == pulse.bpb - 1:
+            build_fill(roll, drums, t, pulse.beat)
         else:
-            for off, pitch, vel, length in _drum_events(style, idx):
-                st = t + off * pulse.beat
-                drums.notes.append(pretty_midi.Note(
-                    velocity=vel, pitch=pitch, start=st, end=st + max(0.06, length * pulse.beat),
-                ))
+            put(t, base)
+
+        # Atterrissage : coup accentué sur le temps fort qui suit le roulement.
+        if idx == 0 and chosen_by_bar.get(bar - 1) in ("snare", "double"):
+            put(t, [(0, DRUM_SNARE, 115, 0.25)])
+
         k += 1
 
     return drums
@@ -1327,22 +1388,25 @@ def orchestrate(
         else:
             all_tracks[name] = build_solo_track(name, chords, tempo)
 
+    melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
+
+    # Ligne mélodique à suivre : la vraie voix de Soprano d'un fichier à voix
+    # nommées (et non le "plus haut son de chaque accord", faussé dès que les
+    # voix n'ont pas le même rythme), sinon le haut de chaque accord.
+    if satb and satb.get("soprano"):
+        line = sorted(satb["soprano"], key=lambda n: n.start)
+    else:
+        line = melody_notes
+
     if add_rhythm:
         all_tracks["__bass"] = build_bass_track(chords, pulse, style)
-        all_tracks["__drums"] = build_drum_track(total_duration, pulse, style, rolls)
-
-    melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
+        all_tracks["__drums"] = build_drum_track(
+            total_duration, pulse, style, rolls, fill_bars=phrase_end_bars(line, pulse)
+        )
 
     reserved_windows: list = []
     if responses:
         tonic_pc, mode = estimate_key(combined_notes)
-        # Avec un fichier à voix nommées, la ligne mélodique à suivre est la
-        # vraie voix de Soprano (et non le "plus haut son de chaque accord",
-        # faussé dès que les voix n'ont pas le même rythme).
-        if satb and satb.get("soprano"):
-            line = sorted(satb["soprano"], key=lambda n: n.start)
-        else:
-            line = melody_notes
         response_tracks, reserved_windows = build_response_tracks(
             line, combined_notes, pulse, responses, tonic_pc, mode
         )
