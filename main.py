@@ -142,7 +142,7 @@ INSTRUMENTS = {
     # si une SoundFont avec un patch plus adapté est utilisée.
     "pedal_steel":     {"program": 26, "name": "Pedal Steel",      "role": "melody"},
     "harp":            {"program": 46, "name": "Harp",             "role": "arpeggio"},
-    "violin":          {"program": 40, "name": "Violin",           "role": "melody"},
+    "violin":          {"program": 40, "name": "Violin",           "role": "legato_strings"},
     "violoncelle":     {"program": 42, "name": "Violoncelle",      "role": "harmony"},
     "opera":           {"program": 53, "name": "Opera",            "role": "pad_chord"},
     "harmonica":       {"program": 22, "name": "Harmonica",        "role": "melody"},
@@ -163,6 +163,28 @@ INSTRUMENTS = {
     # réverbération/chorus réduits (CC91/CC93) pour un son sec et resserré.
     "saxophone_muted_solo": {"program": 65, "name": "Saxophone à sourdine solo", "role": "solo_melody"},
     "trombone_solo":      {"program": 57, "name": "Trombone solo",          "role": "solo_melody"},
+    # Solos issus des instruments harmoniques : même principe (Soprano seul).
+    "trumpet_solo": {"program": 56, "name": "Trompette solo", "role": "solo_melody"},
+    "tuba_solo": {"program": 58, "name": "Tuba solo", "role": "solo_melody"},
+    "organ_solo": {"program": 19, "name": "Orgue solo", "role": "solo_melody"},
+    "choir_solo": {"program": 52, "name": "Chorale solo", "role": "solo_melody"},
+    "guitar_solo": {"program": 25, "name": "Guitare acoustique solo", "role": "solo_melody"},
+    "classical_guitar_solo": {"program": 24, "name": "Guitare classique solo", "role": "solo_melody"},
+    "bass_guitar_solo": {"program": 32, "name": "Guitare basse solo", "role": "solo_melody"},
+    "electric_guitar_solo": {"program": 29, "name": "Guitare électrique solo", "role": "solo_melody"},
+    "piano_low_solo": {"program": 0, "name": "Piano grave solo", "role": "solo_melody"},
+    "piano_medium_solo": {"program": 0, "name": "Piano medium solo", "role": "solo_melody"},
+    "piano_high_solo": {"program": 0, "name": "Piano aigu solo", "role": "solo_melody"},
+    "synth_choir_solo": {"program": 91, "name": "Synth Choir solo", "role": "solo_melody"},
+    "synth_halo_solo": {"program": 94, "name": "Synth Halo solo", "role": "solo_melody"},
+    "synth_lead_solo": {"program": 81, "name": "Synth Lead solo", "role": "solo_melody"},
+    "synth_warm_solo": {"program": 89, "name": "Synth Warm solo", "role": "solo_melody"},
+    "pedal_steel_solo": {"program": 26, "name": "Pedal Steel solo", "role": "solo_melody"},
+    "harp_solo": {"program": 46, "name": "Harpe solo", "role": "solo_melody"},
+    "violin_solo": {"program": 40, "name": "Violon solo", "role": "solo_melody"},
+    "violoncelle_solo": {"program": 42, "name": "Violoncelle solo", "role": "solo_melody"},
+    "opera_solo": {"program": 53, "name": "Opéra solo", "role": "solo_melody"},
+    "harmonica_solo": {"program": 22, "name": "Harmonica solo", "role": "solo_melody"},
 }
 
 # Réglages des instruments solo : décalage d'octave appliqué à la mélodie
@@ -175,6 +197,27 @@ SOLO_SETTINGS = {
     "saxophone_muted_solo": {"shift": 0, "range": (55, 88), "velocity": 70,
                              "cc": {7: 115, 91: 20, 93: 0}, "fixed_velocity": True},
     "trombone_solo":      {"shift": -12, "range": (40, 72), "velocity": 96},
+    "trumpet_solo": {"shift": 0, "range": (55, 84), "velocity": 98},
+    "tuba_solo": {"shift": -24, "range": (28, 58), "velocity": 96},
+    "organ_solo": {"shift": 0, "range": (55, 91), "velocity": 92},
+    "choir_solo": {"shift": 0, "range": (55, 84), "velocity": 90},
+    "guitar_solo": {"shift": 0, "range": (52, 88), "velocity": 100},
+    "classical_guitar_solo": {"shift": 0, "range": (52, 88), "velocity": 100},
+    "bass_guitar_solo": {"shift": -24, "range": (28, 55), "velocity": 104, "fixed_velocity": True},
+    "electric_guitar_solo": {"shift": 0, "range": (52, 88), "velocity": 100},
+    "piano_low_solo": {"shift": -12, "range": (36, 67), "velocity": 96},
+    "piano_medium_solo": {"shift": 0, "range": (48, 84), "velocity": 96},
+    "piano_high_solo": {"shift": 12, "range": (72, 100), "velocity": 94},
+    "synth_choir_solo": {"shift": 0, "range": (55, 88), "velocity": 90},
+    "synth_halo_solo": {"shift": 0, "range": (55, 88), "velocity": 88},
+    "synth_lead_solo": {"shift": 0, "range": (60, 91), "velocity": 96},
+    "synth_warm_solo": {"shift": 0, "range": (55, 88), "velocity": 88},
+    "pedal_steel_solo": {"shift": 0, "range": (52, 88), "velocity": 96},
+    "harp_solo": {"shift": 0, "range": (48, 96), "velocity": 92},
+    "violin_solo": {"shift": 0, "range": (55, 96), "velocity": 98, "legato": True},
+    "violoncelle_solo": {"shift": -12, "range": (36, 76), "velocity": 96, "legato": True},
+    "opera_solo": {"shift": 0, "range": (55, 88), "velocity": 92},
+    "harmonica_solo": {"shift": 0, "range": (60, 91), "velocity": 96},
 }
 
 INSTRUMENT_ALIASES = {
@@ -209,6 +252,9 @@ RESPONSE_INSTRUMENTS = {
     # piste principale "classical_guitar" dans INSTRUMENTS.
     "classical_guitar": 24,
     "piano_high": 0,
+    "harmonica": 22,
+    "trumpet": 56,
+    "violin": 40,
 }
 
 # --------------------------------------------------------------------------
@@ -444,7 +490,74 @@ def _apply_solo_controllers(track: pretty_midi.Instrument, name: str):
         )
 
 
-def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
+def _accent_velocity(pulse, t: float, velocity: int) -> int:
+    """Renforce les temps forts : +10 sur le temps 1, +5 sur le temps 3 (mesure à 4 temps)."""
+    if pulse is None:
+        return velocity
+    k, dist = pulse.nearest_beat(t)
+    if dist > 0.06:
+        return velocity
+    bi = pulse.beat_index(k)
+    if bi == 0:
+        velocity += 10
+    elif pulse.bpb == 4 and bi == 2:
+        velocity += 5
+    return max(1, min(127, velocity))
+
+
+def _legato_ends(notes, max_gap: float = 0.4, release: float = 0.03):
+    """
+    Pour une ligne monophonique triée par début : chaque note dure jusqu'à
+    l'attaque de la suivante (légèrement avant) si le silence qui les sépare
+    est court ; sinon elle garde sa durée propre. Aucune note ne déborde sur
+    la suivante. Renvoie la liste des fins.
+    """
+    ends = []
+    for i, n in enumerate(notes):
+        end = n.end
+        if i + 1 < len(notes):
+            nxt = notes[i + 1].start
+            if nxt - end <= max_gap:
+                end = nxt - 0.01
+            else:
+                end = min(end - release, nxt - 0.01)
+        else:
+            end = end - release
+        ends.append(max(end, n.start + 0.1))
+    return ends
+
+
+def resolve_same_pitch_overlaps(track: pretty_midi.Instrument, gap: float = 0.005):
+    """
+    FluidSynth : une extinction (note-off) coupe TOUTES les notes de même
+    hauteur encore actives sur le canal. Quand deux notes de même hauteur se
+    chevauchent, la première est donc raccourcie pour finir juste avant la
+    seconde, au lieu de faire taire cette dernière prématurément.
+    """
+    by_pitch = {}
+    for n in track.notes:
+        by_pitch.setdefault(n.pitch, []).append(n)
+    for notes in by_pitch.values():
+        notes.sort(key=lambda n: n.start)
+        for a, b in zip(notes, notes[1:]):
+            if a.end > b.start - gap:
+                a.end = max(a.start + 0.02, b.start - gap)
+
+
+def _polish_solo_line(track: pretty_midi.Instrument, cfg: dict):
+    """Ligne solo monophonique : aucune note ne déborde sur la suivante ; liaison si `legato`."""
+    track.notes.sort(key=lambda n: n.start)
+    notes = track.notes
+    if cfg.get("legato"):
+        ends = _legato_ends(notes)
+        for n, e in zip(notes, ends):
+            n.end = e
+    for a, b in zip(notes, notes[1:]):
+        if a.end > b.start - 0.005:
+            a.end = max(a.start + 0.02, b.start - 0.005)
+
+
+def build_solo_track(name: str, chords, tempo: float, pulse=None) -> pretty_midi.Instrument:
     """
     Construit la piste d'un instrument en dérivant mélodie/harmonie/basse
     de l'empilement des accords. Utilisé quand aucune voix SATB nommée
@@ -485,6 +598,32 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
             track.notes.append(pretty_midi.Note(
                 velocity=cfg["velocity"], pitch=p, start=melody.start, end=note_end
             ))
+
+        elif role == "legato_strings":
+            # Cordes frottées : la mélodie (note la plus aiguë) passe au
+            # premier plan, liée jusqu'à l'accord suivant ; les voix
+            # intérieures et la basse restent nettement en retrait. Les
+            # temps forts sont accentués.
+            if idx + 1 < len(chords):
+                next_start = min(n.start for n in chords[idx + 1])
+                legato_end = next_start - 0.01 if next_start - end <= 0.4 else end - 0.03
+            else:
+                legato_end = end - 0.03
+            legato_end = max(legato_end, start + 0.1)
+            seen = set()
+            for n in pitches:
+                if n.pitch in seen:
+                    continue
+                seen.add(n.pitch)
+                if n is melody:
+                    vel = _accent_velocity(pulse, start, 100)
+                    p = clamp_to_range(n.pitch, 55, 100)
+                elif n is bass:
+                    continue  # le violon ne descend pas jusqu'à la basse
+                else:
+                    vel = _accent_velocity(pulse, start, 66)
+                    p = clamp_to_range(n.pitch, 55, 100)
+                track.notes.append(pretty_midi.Note(velocity=vel, pitch=p, start=start, end=legato_end))
 
         elif role == "melody":
             for n in distinct_pitches:
@@ -552,6 +691,10 @@ def build_solo_track(name: str, chords, tempo: float) -> pretty_midi.Instrument:
                 track.notes.append(pretty_midi.Note(velocity=velocity, pitch=p, start=t, end=note_end))
                 t += beat
 
+    if role == "solo_melody":
+        _polish_solo_line(track, SOLO_SETTINGS[name])
+    else:
+        resolve_same_pitch_overlaps(track)
     return track
 
 
@@ -585,7 +728,7 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
             track.notes.append(pretty_midi.Note(
                 velocity=velocity, pitch=pitch, start=n.start, end=end,
             ))
-            continue
+            continue  # polissage de la ligne solo après la boucle
 
         if role in ("melody_high", "harmony_high"):
             pitch = clamp_to_range(pitch + 12, 72, 96)
@@ -614,6 +757,47 @@ def build_voice_double_track(name: str, voice_notes: List[pretty_midi.Note]) -> 
             end=max(end, n.start + 0.05),
         ))
 
+    if role == "solo_melody":
+        _polish_solo_line(track, SOLO_SETTINGS[name])
+    else:
+        resolve_same_pitch_overlaps(track)
+    return track
+
+
+def build_strings_satb_track(name: str, satb: dict, pulse=None) -> pretty_midi.Instrument:
+    """
+    Violon sur un fichier à voix SATB nommées : la VRAIE ligne de Soprano est
+    jouée en entier, liée (plus de notes coupées) et au premier plan ; Alto et
+    Ténor l'accompagnent en retrait, sans jamais doubler une note déjà jouée
+    ni la masquer. La Basse est laissée aux autres instruments. Les temps
+    forts reçoivent un accent de vélocité.
+    """
+    spec = INSTRUMENTS[name]
+    track = pretty_midi.Instrument(program=spec["program"], name=midi_safe_track_name(spec["name"]))
+    _apply_solo_controllers(track, name)
+
+    kept = []  # (pitch, start, end) déjà posés, pour éviter les doublons de hauteur
+
+    def overlaps_same_pitch(p, s0, e0):
+        return any(q == p and s0 < e1 - 0.001 and e0 > s1 + 0.001 for q, s1, e1 in kept)
+
+    for voice, base_vel in (("soprano", 100), ("alto", 68), ("tenor", 64)):
+        notes = sorted(satb.get(voice) or [], key=lambda x: x.start)
+        if not notes:
+            continue
+        ends = _legato_ends(notes)
+        for n, e in zip(notes, ends):
+            p = clamp_to_range(n.pitch, 55, 100)
+            if voice != "soprano" and overlaps_same_pitch(p, n.start, e):
+                continue
+            vel = base_vel
+            if voice == "soprano" and n.velocity:
+                vel = max(base_vel - 8, min(base_vel + 10, n.velocity))
+            vel = _accent_velocity(pulse, n.start, vel)
+            kept.append((p, n.start, e))
+            track.notes.append(pretty_midi.Note(velocity=vel, pitch=p, start=n.start, end=e))
+
+    resolve_same_pitch_overlaps(track)
     return track
 
 
@@ -1123,7 +1307,7 @@ def detect_phrase_boundaries(line, pulse: Pulse) -> List[int]:
     - une note nettement tenue (au moins 1,75 temps ET plus longue que la
       normale du morceau) dont la fin tombe sur un début de mesure.
 
-    Deux frontières retenues sont séparées d'au moins 6 temps. Si le morceau
+    Deux frontières retenues sont séparées d'au moins 4 temps. Si le morceau
     n'offre aucun de ces espaces (mélodie legato sans respiration), il n'y a
     PAS de frontière : mieux vaut aucune réponse qu'une réponse posée par-dessus
     la mélodie.
@@ -1145,7 +1329,7 @@ def detect_phrase_boundaries(line, pulse: Pulse) -> List[int]:
         is_rest = gap >= 0.5 * beat
         is_held = ioi >= max(1.75 * beat, 1.6 * median) and pulse.is_downbeat(nxt.start)
 
-        if (is_rest or is_held) and cur.start - last_start >= 6 * beat:
+        if (is_rest or is_held) and cur.start - last_start >= 4 * beat:
             boundaries.append(i)
             last_start = cur.start
 
@@ -1164,6 +1348,9 @@ def _response_register(name: str):
         "guitar": (52, 84),
         "classical_guitar": (52, 84),
         "piano_high": (72, 105),
+        "harmonica": (60, 91),
+        "trumpet": (58, 84),
+        "violin": (60, 96),
     }.get(name, (55, 88))
 
 
@@ -1233,29 +1420,42 @@ def build_response_tracks(
         return {}, reserved
 
     beat = pulse.beat
-    half = beat / 2.0
     index = _NoteIndex(all_notes)
     response_index = 0
 
-    for i in boundaries:
+    # RÉGULARITÉ : toutes les réponses du morceau ont la même forme — même
+    # valeur de note (croche, ou double-croche si la croche ne convient pas),
+    # même nombre de notes, et finissent toutes calées sur la grille juste
+    # avant l'attaque de la phrase suivante. On choisit la forme qui peut
+    # être posée sur le plus grand nombre de frontières.
+    def place(i: int, unit: float, count: int):
         cur, nxt = line[i], line[i + 1]
         gap = nxt.start - cur.end
+        # dernière case de grille ≤ attaque suivante, puis recul de `count` unités
+        k = math.floor((nxt.start - pulse.phi) / unit + 0.15)
+        anchor = pulse.phi + k * unit
+        start = anchor - count * unit
+        if gap >= 0.5 * beat:
+            ok = start >= cur.end - 0.02
+        else:
+            ok = start >= cur.start + 0.5 * beat
+        return start if ok else None
 
-        # Croches d'abord ; doubles-croches si l'espace est trop court pour
-        # y loger au moins trois croches.
-        start, count, unit = 0.0, 0, half
-        for unit in (half, beat / 4.0):
-            if gap >= 0.5 * beat:
-                k = math.ceil((cur.end - pulse.phi) / unit - 1e-6)
-                start = pulse.phi + k * unit
-                count = min(4, int(((nxt.start - 0.1 * beat) - start) / unit + 1e-6))
-            else:
-                held = nxt.start - cur.start
-                count = min(4, int((held - 0.5 * beat) / unit + 1e-6))
-                start = nxt.start - count * unit
-            if count >= 3:
-                break
-        if count < 3:
+    shape, best_score = None, -1
+    for unit in (beat / 2.0, beat / 4.0):
+        for count in (4, 3):
+            n_ok = sum(1 for i in boundaries if place(i, unit, count) is not None)
+            score = n_ok * 10 + count + (1 if unit == beat / 2.0 else 0)
+            if n_ok and score > best_score:
+                shape, best_score = (unit, count), score
+    if shape is None:
+        return {}, reserved
+    unit, count = shape
+
+    for i in boundaries:
+        cur, nxt = line[i], line[i + 1]
+        start = place(i, unit, count)
+        if start is None:
             continue
 
         name = responses[response_index % len(responses)]
@@ -1277,8 +1477,9 @@ def build_response_tracks(
 
         harmony_at_end = {n.pitch % 12 for n in index.sounding(cur.start + 0.05)}
         base_velocity = {"clarinet": 100, "flute": 98, "guitar": 104,
-                         "classical_guitar": 104, "piano_high": 96}.get(name, 98)
-        gate = 0.84 if name in ("clarinet", "flute") else 0.68
+                         "classical_guitar": 104, "piano_high": 96,
+                         "harmonica": 98, "trumpet": 100, "violin": 98}.get(name, 98)
+        gate = 0.84 if name in ("clarinet", "flute", "harmonica", "trumpet", "violin") else 0.68
         limit = nxt.start - 0.03
 
         prev_pitch = None
@@ -1345,6 +1546,11 @@ _PAN_BY_NAME = {
     "saxophone_solo": 92, "saxophone_muted_solo": 84, "trombone_solo": 105,
     "pedal_steel": 45, "harp": 58, "violin": 35, "violoncelle": 95, "opera": 64, "harmonica": 108,
 }
+# Les solos reprennent le panoramique de leur homonyme harmonique.
+for _k in list(INSTRUMENTS):
+    if _k.endswith("_solo") and _k not in _PAN_BY_NAME:
+        _PAN_BY_NAME[_k] = _PAN_BY_NAME.get(_k[:-5], 64)
+
 
 
 def orchestrate(
@@ -1385,8 +1591,10 @@ def orchestrate(
         voice_key = VOICE_FOR_ROLE.get(role)
         if satb and voice_key and voice_key in satb and satb[voice_key]:
             all_tracks[name] = build_voice_double_track(name, satb[voice_key])
+        elif satb and role == "legato_strings" and satb.get("soprano"):
+            all_tracks[name] = build_strings_satb_track(name, satb, pulse)
         else:
-            all_tracks[name] = build_solo_track(name, chords, tempo)
+            all_tracks[name] = build_solo_track(name, chords, tempo, pulse)
 
     melody_notes = [sorted(c, key=lambda n: n.pitch)[-1] for c in chords]
 
@@ -1423,6 +1631,10 @@ def orchestrate(
         if pan is None and track_name.startswith("__response_"):
             pan = _PAN_BY_NAME.get(track_name.replace("__response_", ""), 64)
         _set_pan(track, 64 if pan is None else pan)
+
+    for track_name, track in all_tracks.items():
+        if track_name != "__drums":
+            resolve_same_pitch_overlaps(track)
 
     out = pretty_midi.PrettyMIDI(initial_tempo=tempo)
 
